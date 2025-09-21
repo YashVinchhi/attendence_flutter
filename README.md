@@ -71,7 +71,7 @@ test/             # Unit and widget tests
 
 ## 🛠️ Requirements
 - Flutter SDK (>=3.0.0 recommended)
-- Android/iOS emulator or device
+- Android emulator or device
 
 ---
 
@@ -117,7 +117,7 @@ This project is licensed under the MIT License.
 ---
 
 ## 🙏 Credits
-- Developed by [Your Name]
+- Developed by Yash Vinchhi
 - Special thanks to contributors and open-source Flutter community
 
 ---
