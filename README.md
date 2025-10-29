@@ -61,7 +61,7 @@ test/             # Unit and widget tests
 
 ## 📦 APK Download
 
-- Download the latest release APK: [Download APK](https://github.com/yourusername/attendance_flutter/releases/latest/download/app-release.apk)
+- Download the latest release APK: [Download APK](https://github.com/yvinchhi/attendence/releases/download/v1.0.0/app-release.apk)
 - To update the APK:
   1. Build your APK: `flutter build apk --release`
   2. Upload `build/app/outputs/apk/release/app-release.apk` to your GitHub Release page.
@@ -71,7 +71,7 @@ test/             # Unit and widget tests
 
 ## 🛠️ Requirements
 - Flutter SDK (>=3.0.0 recommended)
-- Android/iOS emulator or device
+- Android emulator or device
 
 ---
 
@@ -117,7 +117,7 @@ This project is licensed under the MIT License.
 ---
 
 ## 🙏 Credits
-- Developed by [Your Name]
+- Developed by Yash Vinchhi
 - Special thanks to contributors and open-source Flutter community
 
 ---
