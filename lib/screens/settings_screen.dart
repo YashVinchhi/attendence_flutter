@@ -3,6 +3,9 @@ import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
 import '../providers/theme_provider.dart';
 import '../providers/settings_provider.dart';
+import '../providers/student_provider.dart';
+import '../providers/attendance_provider.dart';
+import '../services/navigation_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -28,6 +31,91 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _schoolNameController.dispose();
     _academicYearController.dispose();
     super.dispose();
+  }
+
+  Future<void> _clearAllData() async {
+    final navigationService = Provider.of<NavigationService>(context, listen: false);
+
+    final bool? confirmed = await navigationService.showDialogSafely<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Clear All Data'),
+        content: const Text(
+          'Are you sure you want to delete all data? This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    await Future.delayed(const Duration(milliseconds: 200));
+
+    // Show loading dialog (do not await)
+    navigationService.showDialogSafely(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (loadingContext) => PopScope(
+        canPop: false,
+        child: const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Expanded(child: Text('Clearing all data...')),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final studentProvider = Provider.of<StudentProvider>(context, listen: false);
+      final attendanceProvider = Provider.of<AttendanceProvider>(context, listen: false);
+
+      // Clear all data
+      final success = await studentProvider.clearAllData();
+      attendanceProvider.clearRecords();
+
+      if (!mounted) return;
+
+      await navigationService.popDialog(context, useRootNavigator: true);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(success ? 'All data cleared successfully!' : 'Failed to clear data'),
+            backgroundColor: success ? Colors.green : Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+
+      await navigationService.popDialog(context, useRootNavigator: true);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -196,6 +284,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onTap: () {
                           showDialog(
                             context: context,
+                            useRootNavigator: true,
                             builder: (context) => AlertDialog(
                               title: const Text('About Developer'),
                               content: const Text(
@@ -259,33 +348,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         title: const Text('Clear All Data'),
                         subtitle: const Text('Delete all students and attendance records'),
                         onTap: () {
-                          showDialog(
-                            context: context,
-                            builder: (context) => AlertDialog(
-                              title: const Text('Clear All Data'),
-                              content: const Text(
-                                'Are you sure you want to delete all data? This action cannot be undone.',
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.of(context).pop(),
-                                  child: const Text('Cancel'),
-                                ),
-                                TextButton(
-                                  onPressed: () {
-                                    Navigator.of(context).pop();
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Clear data feature coming soon!'),
-                                      ),
-                                    );
-                                  },
-                                  style: TextButton.styleFrom(foregroundColor: Colors.red),
-                                  child: const Text('Clear'),
-                                ),
-                              ],
-                            ),
-                          );
+                          _clearAllData();
                         },
                       ),
                     ],

@@ -295,20 +295,47 @@ class StudentProvider with ChangeNotifier {
     }
   }
 
-  // Bulk import from CSV
+  // Helper: check if a CSV row is effectively empty (all cells null/empty)
+  bool _isRowEmpty(List<dynamic> row) {
+    return row.isEmpty || row.every((c) => (c == null) || c.toString().trim().isEmpty);
+  }
+
+  // Helper: try to parse department/division from roll e.g., CE-B:01 -> CE, B
+  Map<String, String>? _extractDeptDivFromRoll(String roll) {
+    final re = RegExp(r'^([A-Za-z]+)-([A-Za-z]+):([0-9]+)$');
+    final m = re.firstMatch(roll.trim());
+    if (m != null) {
+      return {
+        'department': m.group(1)!.toUpperCase(),
+        'division': m.group(2)!.toUpperCase(),
+      };
+    }
+    return null;
+  }
+
+  // Bulk import from CSV with batching
   Future<Map<String, dynamic>> bulkImportFromCsv(String csvData) async {
     _setState(StudentProviderState.loading);
+    const int batchSize = 50; // Process 50 students at a time
 
     try {
-      final List<List<dynamic>> csvTable = const CsvToListConverter().convert(csvData);
+      final List<List<dynamic>> rawTable = const CsvToListConverter().convert(csvData);
 
-      if (csvTable.isEmpty) {
+      if (rawTable.isEmpty) {
         _setState(StudentProviderState.error, error: 'CSV file is empty');
         return {'success': false, 'message': 'CSV file is empty'};
       }
 
+      // Remove empty rows
+      final nonEmptyRows = rawTable.where((r) => !_isRowEmpty(r)).toList();
+      if (nonEmptyRows.isEmpty) {
+        _setState(StudentProviderState.error, error: 'CSV contains no data rows');
+        return {'success': false, 'message': 'CSV contains no data rows'};
+      }
+
       // Skip header row if it exists
-      final dataRows = csvTable.length > 1 && _isHeaderRow(csvTable[0]) ? csvTable.skip(1).toList() : csvTable;
+      final bool hasHeader = _isHeaderRow(nonEmptyRows.first);
+      final dataRows = hasHeader ? nonEmptyRows.skip(1).toList() : nonEmptyRows;
 
       if (dataRows.isEmpty) {
         _setState(StudentProviderState.error, error: 'No data rows found in CSV');
@@ -317,19 +344,110 @@ class StudentProvider with ChangeNotifier {
 
       List<Student> studentsToAdd = [];
       List<String> errors = [];
-      Set<String> rollNumbers = <String>{};
+      Set<String> existingRollNumbers = {};
 
-      // Validate and parse each row
-      for (int i = 0; i < dataRows.length; i++) {
-        final row = dataRows[i];
-        final rowNumber = i + 1;
+      // Pre-fetch existing roll numbers in one go
+      final existingStudents = await DatabaseHelper.instance.getAllStudents();
+      existingRollNumbers.addAll(existingStudents.map((s) => s.rollNumber.toUpperCase()));
 
-        try {
-          if (row.length < 5) {
-            errors.add('Row $rowNumber: Missing required fields (expected: name, roll_number, semester, department, division)');
-            continue;
+      // Process rows in batches
+      for (int i = 0; i < dataRows.length; i += batchSize) {
+        final endIndex = (i + batchSize < dataRows.length) ? i + batchSize : dataRows.length;
+        final batch = dataRows.sublist(i, endIndex);
+
+        await _processCsvBatch(batch, i, studentsToAdd, errors, existingRollNumbers);
+
+        // Update loading state with progress
+        _setState(StudentProviderState.loading);
+        _safeNotifyListeners();
+      }
+
+      if (studentsToAdd.isEmpty) {
+        _setState(StudentProviderState.error, error: 'No valid students to import');
+        return {
+          'success': false,
+          'message': 'No valid students to import',
+          'errors': errors,
+          'imported': 0,
+          'total': dataRows.length,
+        };
+      }
+
+      // Bulk insert using batched transactions
+      final db = await DatabaseHelper.instance.database;
+
+      int totalInserted = 0;
+      final List<Student> allAdded = [];
+
+      // Insert in batches
+      for (int i = 0; i < studentsToAdd.length; i += batchSize) {
+        final endIndex = (i + batchSize < studentsToAdd.length) ? i + batchSize : studentsToAdd.length;
+        final batch = studentsToAdd.sublist(i, endIndex);
+
+        // Track only this batch's added students to avoid duplicates in provider list
+        final List<Student> batchAdded = [];
+
+        await db.transaction((txn) async {
+          for (final student in batch) {
+            try {
+              final id = await txn.insert('students', student.toMap());
+              final s = student.copyWith(id: id);
+              batchAdded.add(s);
+              allAdded.add(s);
+            } catch (e) {
+              errors.add('Failed to insert ${student.name} (${student.rollNumber}): ${e.toString()}');
+            }
           }
+        });
 
+        totalInserted += batchAdded.length;
+
+        // Update UI after each batch: add only newly added
+        _students.addAll(batchAdded);
+        _sortStudents();
+        _safeNotifyListeners();
+      }
+
+      _setState(StudentProviderState.idle);
+      return {
+        'success': true,
+        'message': 'Import completed',
+        'imported': totalInserted,
+        'total': dataRows.length,
+        'errors': errors,
+      };
+    } catch (e) {
+      _setState(StudentProviderState.error, error: 'Import failed: ${e.toString()}');
+      return {
+        'success': false,
+        'message': 'Import failed: ${e.toString()}',
+        'imported': 0,
+        'total': 0,
+        'errors': [e.toString()],
+      };
+    }
+  }
+
+  Future<void> _processCsvBatch(
+    List<List<dynamic>> batch,
+    int startIndex,
+    List<Student> studentsToAdd,
+    List<String> errors,
+    Set<String> existingRollNumbers,
+  ) async {
+    for (int i = 0; i < batch.length; i++) {
+      final row = batch[i];
+      final rowNumber = startIndex + i + 1;
+
+      try {
+        // Skip empty rows defensively
+        if (_isRowEmpty(row)) {
+          continue;
+        }
+
+        // Try to support multiple formats
+        // Format A (5+ columns): Name, Roll, Semester, Department, Division
+        if (row.length >= 5) {
           final name = row[0]?.toString().trim() ?? '';
           final rollNumber = row[1]?.toString().trim() ?? '';
           final semesterStr = row[2]?.toString().trim() ?? '';
@@ -348,19 +466,11 @@ class StudentProvider with ChangeNotifier {
           }
 
           final normalizedRollNumber = rollNumber.toUpperCase();
-
-          // Check for duplicate roll numbers in CSV
-          if (rollNumbers.contains(normalizedRollNumber)) {
-            errors.add('Row $rowNumber: Duplicate roll number "$rollNumber" in CSV');
+          if (existingRollNumbers.contains(normalizedRollNumber)) {
+            errors.add('Row $rowNumber: Roll number "$rollNumber" already exists');
             continue;
           }
-          rollNumbers.add(normalizedRollNumber);
-
-          // Check if roll number already exists in database
-          if (await DatabaseHelper.instance.isRollNumberExists(rollNumber)) {
-            errors.add('Row $rowNumber: Roll number "$rollNumber" already exists in database');
-            continue;
-          }
+          existingRollNumbers.add(normalizedRollNumber);
 
           final student = Student(
             name: name,
@@ -372,65 +482,101 @@ class StudentProvider with ChangeNotifier {
           );
 
           studentsToAdd.add(student);
-        } catch (e) {
-          errors.add('Row $rowNumber: ${e.toString()}');
+          continue;
         }
-      }
 
-      if (studentsToAdd.isEmpty) {
-        _setState(StudentProviderState.error, error: 'No valid students to import');
-        return {
-          'success': false,
-          'message': 'No valid students to import',
-          'errors': errors,
-          'imported': 0,
-          'total': dataRows.length,
-        };
-      }
+        // Format B (2+ columns): Roll, Name OR Name, Roll
+        if (row.length >= 2) {
+          String c0 = row[0]?.toString().trim() ?? '';
+          String c1 = row[1]?.toString().trim() ?? '';
 
-      // Bulk insert using transaction
-      final db = await DatabaseHelper.instance.database;
-      List<Student> addedStudents = [];
+          String? roll;
+          String? name;
 
-      await db.transaction((txn) async {
-        for (final student in studentsToAdd) {
-          try {
-            final id = await txn.insert('students', student.toMap());
-            addedStudents.add(student.copyWith(id: id));
-          } catch (e) {
-            errors.add('Failed to insert ${student.name} (${student.rollNumber}): ${e.toString()}');
+          final rollFromC0 = _extractDeptDivFromRoll(c0) != null || ValidationHelper.isValidRollNumber(c0);
+          final rollFromC1 = _extractDeptDivFromRoll(c1) != null || ValidationHelper.isValidRollNumber(c1);
+
+          if (rollFromC0 && !rollFromC1) {
+            roll = c0; name = c1;
+          } else if (!rollFromC0 && rollFromC1) {
+            roll = c1; name = c0;
+          } else if (rollFromC0 && rollFromC1) {
+            // Ambiguous, prefer CE/IT pattern in c0
+            roll = _extractDeptDivFromRoll(c0) != null ? c0 : c1;
+            name = roll == c0 ? c1 : c0;
+          } else {
+            errors.add('Row $rowNumber: Could not determine roll and name from columns');
+            continue;
           }
+
+          if ((name?.isEmpty ?? true) || (roll?.isEmpty ?? true)) {
+            errors.add('Row $rowNumber: Empty required fields');
+            continue;
+          }
+
+          final inferred = _extractDeptDivFromRoll(roll!);
+          if (inferred == null) {
+            errors.add('Row $rowNumber: Roll "$roll" not in expected pattern like CE-B:01');
+            continue;
+          }
+
+          final normalizedRollNumber = roll.toUpperCase();
+          if (existingRollNumbers.contains(normalizedRollNumber)) {
+            errors.add('Row $rowNumber: Roll number "$roll" already exists');
+            continue;
+          }
+          existingRollNumbers.add(normalizedRollNumber);
+
+          final student = Student(
+            name: name!,
+            rollNumber: roll,
+            semester: 3, // Default when not provided
+            department: inferred['department']!,
+            division: inferred['division']!,
+            timeSlot: '8:00-8:50',
+          );
+
+          studentsToAdd.add(student);
+          continue;
         }
-      });
 
-      // Update local state
-      _students.addAll(addedStudents);
-      _sortStudents();
-      _setState(StudentProviderState.idle);
-
-      return {
-        'success': true,
-        'message': 'Import completed',
-        'imported': addedStudents.length,
-        'total': dataRows.length,
-        'errors': errors,
-      };
-    } catch (e) {
-      print('Error in bulk import: $e');
-      _setState(StudentProviderState.error, error: 'Failed to import CSV: ${e.toString()}');
-      return {
-        'success': false,
-        'message': 'Failed to import CSV: ${e.toString()}',
-      };
+        // If we get here, the row is not in a supported format
+        errors.add('Row $rowNumber: Unsupported row format');
+      } catch (e) {
+        errors.add('Row $rowNumber: ${e.toString()}');
+      }
     }
   }
 
   bool _isHeaderRow(List<dynamic> row) {
     if (row.isEmpty) return false;
     final firstCell = row[0]?.toString().toLowerCase() ?? '';
-    return firstCell.contains('name') ||
-           firstCell.contains('student') ||
-           firstCell.contains('roll') ||
-           firstCell == 'name';
+    if (firstCell.contains('name') || firstCell == 'name') return true;
+    if (firstCell.contains('student')) return true;
+    if (firstCell.contains('roll')) return true;
+    // Also consider a header like: Roll, Name
+    if (row.length >= 2) {
+      final c1 = row[1]?.toString().toLowerCase() ?? '';
+      if ((firstCell.contains('roll') && c1.contains('name')) || (firstCell.contains('name') && c1.contains('roll'))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Clear all data (students and attendance)
+  Future<bool> clearAllData() async {
+    _setState(StudentProviderState.loading);
+
+    try {
+      await DatabaseHelper.instance.clearAllData();
+      _students.clear();
+      _setState(StudentProviderState.idle);
+      return true;
+    } catch (e) {
+      print('Error clearing all data: $e');
+      _setState(StudentProviderState.error, error: 'Failed to clear data: ${e.toString()}');
+      return false;
+    }
   }
 }

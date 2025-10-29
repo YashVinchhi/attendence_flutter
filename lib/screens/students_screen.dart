@@ -1,11 +1,14 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 import '../providers/student_provider.dart';
 import '../services/database_helper.dart';
+import '../services/navigation_service.dart';
 
 class StudentsScreen extends StatefulWidget {
   const StudentsScreen({super.key});
@@ -23,11 +26,10 @@ class _StudentsScreenState extends State<StudentsScreen> {
   String _selectedDepartment = 'CE';
   String _selectedDivision = 'A';
   String _searchQuery = '';
+  String _sortBy = 'roll'; // 'roll' | 'name'
   bool _isAddingStudent = false;
-  // Reuse _isAddingStudent as a generic "saving" flag for add/update
   Student? _editingStudent; // currently editing student reference
 
-  // Time slot selection removed from Add Student dialog. Use this default when creating students.
   final String _defaultTimeSlot = '8:00-8:50';
 
   @override
@@ -55,6 +57,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
 
     return showDialog(
       context: context,
+      useRootNavigator: true,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
@@ -184,7 +187,6 @@ class _StudentsScreenState extends State<StudentsScreen> {
         semester: _selectedSemester,
         department: _selectedDepartment,
         division: _selectedDivision,
-        // Use default time slot
         timeSlot: _defaultTimeSlot,
       );
 
@@ -239,6 +241,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
 
     return showDialog(
       context: context,
+      useRootNavigator: true,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
@@ -409,6 +412,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
   Future<void> _deleteStudent(Student student) async {
     final confirmed = await showDialog<bool>(
       context: context,
+      useRootNavigator: true,
       builder: (context) => AlertDialog(
         title: const Text('Delete Student'),
         content: Text('Are you sure you want to delete ${student.name}?'),
@@ -446,13 +450,57 @@ class _StudentsScreenState extends State<StudentsScreen> {
   }
 
   List<Student> _getFilteredStudents(List<Student> students) {
-    if (_searchQuery.isEmpty) return students;
+    List<Student> list = students;
 
-    return students.where((student) {
-      return student.name.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-             student.rollNumber.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-             student.department.toLowerCase().contains(_searchQuery.toLowerCase());
-    }).toList();
+    if (_searchQuery.isNotEmpty) {
+      list = list.where((student) {
+        return student.name.toLowerCase().contains(_searchQuery.toLowerCase()) ||
+               student.rollNumber.toLowerCase().contains(_searchQuery.toLowerCase()) ||
+               student.department.toLowerCase().contains(_searchQuery.toLowerCase());
+      }).toList();
+    }
+
+    int _compareCeItRoll(Student a, Student b) {
+      final ceitRegex = RegExp(r'^(CE|IT)-[A-Z]:(\d+)', caseSensitive: false);
+      final ma = ceitRegex.firstMatch(a.rollNumber.toUpperCase());
+      final mb = ceitRegex.firstMatch(b.rollNumber.toUpperCase());
+
+      if (ma != null && mb != null) {
+        final deptA = ma.group(1)!; // CE or IT
+        final deptB = mb.group(1)!;
+        if (deptA != deptB) return deptA == 'CE' ? -1 : 1; // CE before IT
+        final numA = int.tryParse(ma.group(2)!) ?? 0;
+        final numB = int.tryParse(mb.group(2)!) ?? 0;
+        return numA.compareTo(numB);
+      }
+
+      // If only one matches the CE/IT pattern, prefer the matching one
+      if (ma != null && mb == null) return -1;
+      if (ma == null && mb != null) return 1;
+
+      // Fallback: compare by first numeric sequence found
+      final numRegex = RegExp(r'(\d+)');
+      final ra = numRegex.firstMatch(a.rollNumber);
+      final rb = numRegex.firstMatch(b.rollNumber);
+      if (ra != null && rb != null) {
+        final na = int.tryParse(ra.group(1)!) ?? 0;
+        final nb = int.tryParse(rb.group(1)!) ?? 0;
+        return na.compareTo(nb);
+      }
+
+      // Last resort: alphabetical roll string
+      return a.rollNumber.compareTo(b.rollNumber);
+    }
+
+    list.sort((a, b) {
+      if (_sortBy == 'name') {
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      }
+      // Default: CE group first, then IT group, each by numeric roll
+      return _compareCeItRoll(a, b);
+    });
+
+    return list;
   }
 
   Future<void> _importFromCsv() async {
@@ -461,11 +509,19 @@ class _StudentsScreenState extends State<StudentsScreen> {
         type: FileType.custom,
         allowedExtensions: ['csv'],
         allowMultiple: false,
+        withData: true,
       );
 
-      if (result != null && result.files.single.path != null) {
-        final file = File(result.files.single.path!);
-        final csvData = await file.readAsString();
+      if (result != null) {
+        String csvData;
+        if (result.files.single.path != null) {
+          final file = File(result.files.single.path!);
+          csvData = await file.readAsString();
+        } else if (result.files.single.bytes != null) {
+          csvData = String.fromCharCodes(result.files.single.bytes!);
+        } else {
+          throw Exception('Unable to read file data');
+        }
 
         if (mounted) {
           _showImportDialog(csvData);
@@ -487,14 +543,15 @@ class _StudentsScreenState extends State<StudentsScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
+      useRootNavigator: true,
+      builder: (dialogContext) {
         return AlertDialog(
           title: const Text('Import Students from CSV'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('CSV Format Expected:'),
+              const Text('CSV Formats Supported:'),
               const SizedBox(height: 8),
               Container(
                 padding: const EdgeInsets.all(8),
@@ -503,24 +560,41 @@ class _StudentsScreenState extends State<StudentsScreen> {
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: const Text(
+                  'Format A (5 columns):\n'
                   'Name, Roll Number, Semester, Department, Division\n'
                   'Example:\n'
                   'John Doe, 21CE001, 3, CE, A\n'
-                  'Jane Smith, 21IT002, 3, IT, B',
+                  'Jane Smith, 21IT002, 3, IT, B\n\n'
+                  'Format B (2 columns, CE/IT style):\n'
+                  'Roll, Name  (e.g., CE-B:01, JOHN DOE)\n'
+                  'Example:\n'
+                  'CE-B:01, KANJARIYA VAISHALIBEN BHIKHABHAI\n'
+                  'IT-B:02, DUDHAIYA RACHIT VIPULBHAI',
                   style: TextStyle(fontFamily: 'monospace', fontSize: 12),
                 ),
               ),
+              const SizedBox(height: 16),
+              const Text('Tips:'),
+              const SizedBox(height: 4),
+              const Text('- Headers are optional and will be detected automatically.'),
+              const Text('- Empty lines are ignored. Non-student label lines may be reported as errors.'),
               const SizedBox(height: 16),
               const Text('This will import all valid students from the CSV file.'),
             ],
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: () => Navigator.of(dialogContext).pop(),
               child: const Text('Cancel'),
             ),
             ElevatedButton(
-              onPressed: () => _performCsvImport(csvData),
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await Future.delayed(const Duration(milliseconds: 100));
+                if (context.mounted) {
+                  _performCsvImport(csvData);
+                }
+              },
               child: const Text('Import'),
             ),
           ],
@@ -530,20 +604,32 @@ class _StudentsScreenState extends State<StudentsScreen> {
   }
 
   Future<void> _performCsvImport(String csvData) async {
-    Navigator.of(context).pop(); // Close the dialog
+    if (!mounted) return;
 
-    // Show loading dialog
-    showDialog(
+    final navigationService = Provider.of<NavigationService>(context, listen: false);
+    final loadingDialog = AlertDialog(
+      title: const Text('Importing Students'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const LinearProgressIndicator(),
+          const SizedBox(height: 16),
+          Consumer<StudentProvider>(
+            builder: (context, provider, child) {
+              return const Text('Processing CSV data...');
+            },
+          ),
+        ],
+      ),
+    );
+
+    navigationService.showDialogSafely(
       context: context,
       barrierDismissible: false,
-      builder: (context) => const AlertDialog(
-        content: Row(
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(width: 16),
-            Text('Importing students...'),
-          ],
-        ),
+      useRootNavigator: true,
+      builder: (dialogContext) => PopScope(
+        canPop: false,
+        child: loadingDialog,
       ),
     );
 
@@ -552,18 +638,24 @@ class _StudentsScreenState extends State<StudentsScreen> {
       final result = await studentProvider.bulkImportFromCsv(csvData);
 
       if (mounted) {
-        Navigator.of(context).pop(); // Close loading dialog
-        _showImportResultDialog(result);
+        await navigationService.popDialog(context, useRootNavigator: true);
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (mounted) {
+          _showImportResultDialog(result);
+        }
       }
     } catch (e) {
       if (mounted) {
-        Navigator.of(context).pop(); // Close loading dialog
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Import failed: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        await navigationService.popDialog(context, useRootNavigator: true);
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Import failed: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }
@@ -576,6 +668,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
 
     showDialog(
       context: context,
+      useRootNavigator: true,
       builder: (context) {
         return AlertDialog(
           title: Text(success ? 'Import Completed' : 'Import Failed'),
@@ -624,6 +717,76 @@ class _StudentsScreenState extends State<StudentsScreen> {
     );
   }
 
+  Widget _buildSkeletonList() {
+    final scheme = Theme.of(context).colorScheme;
+    final base = scheme.surfaceContainerHighest.withValues(alpha: 0.5);
+    final highlight = scheme.surfaceContainerHighest.withValues(alpha: 0.9);
+
+    return ListView.separated(
+      padding: const EdgeInsets.all(16),
+      itemBuilder: (_, __) => _Shimmer(
+        baseColor: base,
+        highlightColor: highlight,
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: Row(
+              children: [
+                const CircleAvatar(radius: 20, backgroundColor: Colors.white24),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(height: 14, width: 160, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8))),
+                      const SizedBox(height: 8),
+                      Container(height: 12, width: 220, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8))),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Container(width: 24, height: 24, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(6))),
+                const SizedBox(width: 8),
+                Container(width: 24, height: 24, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(6))),
+              ],
+            ),
+          ),
+        ),
+      ),
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemCount: 8,
+    );
+  }
+
+  Future<void> _resetSampleData() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset Sample Data'),
+        content: const Text('This will clear all current students and attendance, then reload the built-in sample students. Continue?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Reset')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await DatabaseHelper.instance.clearAllData();
+      // Ensure sample loader is allowed
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('user_cleared_data', false);
+      // Re-fetch; this will auto-load sample if DB is empty
+      await Provider.of<StudentProvider>(context, listen: false).fetchStudents();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Sample data reloaded')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Reset failed: $e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -644,91 +807,186 @@ class _StudentsScreenState extends State<StudentsScreen> {
             onPressed: _importFromCsv,
             tooltip: 'Import Students from CSV',
           ),
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'reset') _resetSampleData();
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(value: 'reset', child: Text('Reset sample data')),
+            ],
+          ),
         ],
       ),
       body: Consumer<StudentProvider>(
         builder: (context, studentProvider, child) {
-          if (studentProvider.isLoading) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
+          final isLoading = studentProvider.isLoading;
           final filteredStudents = _getFilteredStudents(studentProvider.students);
+          final total = studentProvider.students.length;
+          final shown = filteredStudents.length;
 
-          return Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: TextField(
-                  controller: _searchController,
-                  decoration: const InputDecoration(
-                    hintText: 'Search students...',
-                    prefixIcon: Icon(Icons.search),
-                    border: OutlineInputBorder(),
-                  ),
-                  onChanged: (value) {
-                    setState(() {
-                      _searchQuery = value;
-                    });
-                  },
-                ),
-              ),
-              Expanded(
-                child: filteredStudents.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'No students found.\nTap + to add a student.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 16),
-                        ),
-                      )
-                    : ListView.builder(
-                        itemCount: filteredStudents.length,
-                        itemBuilder: (context, index) {
-                          final student = filteredStudents[index];
-                          return Card(
-                            margin: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 4,
-                            ),
-                            child: ListTile(
-                              leading: CircleAvatar(
-                                child: Text(
-                                  student.name.isNotEmpty
-                                      ? student.name[0].toUpperCase()
-                                      : '?',
+          return RefreshIndicator(
+            onRefresh: () => studentProvider.fetchStudents(),
+            child: ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    children: [
+                      TextField(
+                        controller: _searchController,
+                        decoration: InputDecoration(
+                          hintText: 'Search students by name or roll...',
+                          prefixIcon: const Icon(Icons.search),
+                          border: const OutlineInputBorder(),
+                          suffixIcon: _searchController.text.isEmpty
+                              ? null
+                              : IconButton(
+                                  icon: const Icon(Icons.clear),
+                                  tooltip: 'Clear',
+                                  onPressed: () {
+                                    _searchController.clear();
+                                    setState(() => _searchQuery = '');
+                                  },
                                 ),
-                              ),
-                              title: Text(student.name),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text('Roll No: ${student.rollNumber}'),
-                                  Text(
-                                    'Sem ${student.semester} • ${student.department} • Div ${student.division}',
-                                  ),
-                                  Text('Time Slot: ${student.timeSlot}'),
-                                ],
-                              ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.edit, color: Colors.blue),
-                                    onPressed: () => _showEditStudentDialog(student),
-                                    tooltip: 'Edit',
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete, color: Colors.red),
-                                    onPressed: () => _deleteStudent(student),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
+                        ),
+                        onChanged: (value) {
+                          setState(() {
+                            _searchQuery = value;
+                          });
                         },
                       ),
-              ),
-            ],
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Showing $shown of $total', style: Theme.of(context).textTheme.labelMedium),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(value: 'roll', label: Text('Sort: Roll'), icon: Icon(Icons.onetwothree)),
+                                ButtonSegment(value: 'name', label: Text('Sort: Name'), icon: Icon(Icons.sort_by_alpha)),
+                              ],
+                              selected: {_sortBy},
+                              style: ButtonStyle(
+                                shape: const WidgetStatePropertyAll(StadiumBorder()),
+                                side: WidgetStateProperty.resolveWith((states) {
+                                  final selected = states.contains(WidgetState.selected);
+                                  return BorderSide(color: selected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.outlineVariant);
+                                }),
+                                foregroundColor: WidgetStateProperty.resolveWith((states) {
+                                  final selected = states.contains(WidgetState.selected);
+                                  return selected ? Colors.white : Theme.of(context).colorScheme.onSurface;
+                                }),
+                                backgroundColor: WidgetStateProperty.resolveWith((states) {
+                                  final selected = states.contains(WidgetState.selected);
+                                  return selected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.surfaceContainerHighest;
+                                }),
+                              ),
+                              onSelectionChanged: (s) {
+                                setState(() => _sortBy = s.first);
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          // Quick CTA chip
+                          ActionChip(
+                            avatar: const Icon(Icons.download, size: 18),
+                            label: const Text('Import CSV'),
+                            onPressed: _importFromCsv,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                if (isLoading)
+                  SizedBox(height: MediaQuery.of(context).size.height * 0.6, child: _buildSkeletonList())
+                else if (filteredStudents.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          const Icon(Icons.people_outline, size: 72),
+                          const SizedBox(height: 12),
+                          const Text('No Students Found', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 8),
+                          const Text('Add students or import from a CSV file to get started.', textAlign: TextAlign.center),
+                          const SizedBox(height: 16),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              ElevatedButton.icon(
+                                onPressed: _showAddStudentDialog,
+                                icon: const Icon(Icons.person_add),
+                                label: const Text('Add Student'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: _importFromCsv,
+                                icon: const Icon(Icons.upload_file),
+                                label: const Text('Import Students from CSV'),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  ListView.builder(
+                    physics: const NeverScrollableScrollPhysics(),
+                    shrinkWrap: true,
+                    itemCount: filteredStudents.length,
+                    itemBuilder: (context, index) {
+                      final student = filteredStudents[index];
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 4,
+                        ),
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            child: Text(
+                              student.name.isNotEmpty
+                                  ? student.name[0].toUpperCase()
+                                  : '?',
+                            ),
+                          ),
+                          title: Text(student.name),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Roll No: ${student.rollNumber}'),
+                              Text(
+                                'Sem ${student.semester} • ${student.department} • Div ${student.division}',
+                              ),
+                              Text('Time Slot: ${student.timeSlot}'),
+                            ],
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.edit, color: Colors.blue),
+                                onPressed: () => _showEditStudentDialog(student),
+                                tooltip: 'Edit',
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete, color: Colors.red),
+                                onPressed: () => _deleteStudent(student),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+              ],
+            ),
           );
         },
       ),
@@ -736,6 +994,59 @@ class _StudentsScreenState extends State<StudentsScreen> {
         onPressed: _showAddStudentDialog,
         child: const Icon(Icons.add),
       ),
+    );
+  }
+}
+
+class _Shimmer extends StatefulWidget {
+  final Widget child;
+  final Color baseColor;
+  final Color highlightColor;
+  const _Shimmer({required this.child, required this.baseColor, required this.highlightColor});
+
+  @override
+  State<_Shimmer> createState() => _ShimmerState();
+}
+
+class _ShimmerState extends State<_Shimmer> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500))
+      ..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      child: widget.child,
+      builder: (context, child) {
+        final v = _controller.value; // 0..1
+        final gradient = LinearGradient(
+          begin: Alignment(-1.0 + 2.0 * v, 0.0),
+          end: Alignment(1.0 + 2.0 * v, 0.0),
+          colors: [
+            widget.baseColor,
+            widget.highlightColor,
+            widget.baseColor,
+          ],
+          stops: const [0.35, 0.5, 0.65],
+        );
+        return ShaderMask(
+          shaderCallback: (rect) => gradient.createShader(rect),
+          blendMode: BlendMode.srcATop,
+          child: child,
+        );
+      },
     );
   }
 }

@@ -358,3 +358,4 @@ class ValidationHelper {
     return !fromDate.isAfter(now) && !toDate.isAfter(now) && !fromDate.isAfter(toDate);
   }
 }
+

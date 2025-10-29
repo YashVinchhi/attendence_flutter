@@ -1,5 +1,6 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 
 class DatabaseHelper {
@@ -95,6 +96,15 @@ class DatabaseHelper {
       final existingStudents = await db.query('students', limit: 1);
       if (existingStudents.isNotEmpty) {
         print('Sample data already loaded, skipping...');
+        return;
+      }
+
+      // Check if user has previously cleared data - if so, don't auto-load sample data
+      final prefs = await SharedPreferences.getInstance();
+      final hasUserClearedData = prefs.getBool('user_cleared_data') ?? false;
+
+      if (hasUserClearedData) {
+        print('User has cleared data, not loading sample data automatically');
         return;
       }
 
@@ -324,6 +334,15 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [student.id],
     );
+  }
+
+  // Utility: Clear all data from tables for a clean reset
+  Future<void> clearAllData() async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      await txn.delete('attendance');
+      await txn.delete('students');
+    });
   }
 
   Future<int> deleteStudent(int id) async {
@@ -658,5 +677,16 @@ class DatabaseHelper {
   Future<void> close() async {
     final db = await instance.database;
     await db.close();
+  }
+
+  // Clear all data methods
+  Future<void> clearAllStudents() async {
+    final db = await instance.database;
+    await db.delete('students');
+  }
+
+  Future<void> clearAllAttendance() async {
+    final db = await instance.database;
+    await db.delete('attendance');
   }
 }

@@ -146,27 +146,38 @@ class AttendanceProvider with ChangeNotifier {
     try {
       await fetchAttendanceByDate(date); // refresh
       final allStudents = await DatabaseHelper.instance.getStudentsByCombinedClassOrdered(semester, department, division);
-      if (allStudents.isEmpty) {
-        return 'DAILY ABSENTEE REPORT\nDate: $date\nClass: ${semester}${department}-${division}\nNo students found.';
-      }
-      final studentMap = {for (var s in allStudents) s.id!: s};
+      // Prepare header pieces in requested format
       final classDisplay = '${semester}${department}-${division}';
+      late final String headerLine;
+      try {
+        final dt = DateTime.parse(date);
+        const days = ['MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY','SUNDAY'];
+        final dd = dt.day.toString().padLeft(2, '0');
+        final mm = dt.month.toString().padLeft(2, '0');
+        final yyyy = dt.year.toString();
+        final dow = days[dt.weekday - 1];
+        headerLine = '$classDisplay,$dd/$mm/$yyyy, $dow';
+      } catch (_) {
+        // Fallback to raw date if parsing fails
+        headerLine = '$classDisplay,$date';
+      }
+
+      if (allStudents.isEmpty) {
+        return headerLine + '\nNo students found.';
+      }
+
+      final studentMap = {for (var s in allStudents) s.id!: s};
       final idSet = studentMap.keys.toSet();
 
       // Collect absent attendance rows for that class/date
       final absentRecords = _attendanceRecords.where((r) => _formatDate(r.date) == date && !r.isPresent && idSet.contains(r.studentId)).toList();
 
       final sb = StringBuffer();
-      sb.writeln('DAILY ABSENTEE REPORT');
-      sb.writeln('Date: $date');
-      sb.writeln('Class: $classDisplay');
-      sb.writeln('Total Students: ${allStudents.length}');
-      sb.writeln('Absent Marks: ${absentRecords.length}');
+      sb.writeln(headerLine);
       sb.writeln('');
 
       if (absentRecords.isEmpty) {
         sb.writeln('All students present');
-        sb.writeln('Generated on: ${DateTime.now().toString().substring(0,16)}');
         return sb.toString();
       }
 
@@ -234,26 +245,27 @@ class AttendanceProvider with ChangeNotifier {
         final timing = _timingForLecture(lectureNum);
         final faculty = _facultyFor(subject);
 
-        sb.writeln('[${headerIndex}] $subject${lectureNum > 0 ? ' (Lecture $lectureNum)' : ''}${timing.isNotEmpty ? ' $timing' : ''}${faculty.isNotEmpty ? ' [$faculty]' : ''}');
+        // Requested: remove '(Lecture X)' label and keep index + subject + timing + faculty
+        sb.writeln('[${headerIndex}] $subject${timing.isNotEmpty ? ' $timing' : ''}${faculty.isNotEmpty ? ' [$faculty]' : ''}');
 
-        // Build department-division grouping
-        final Map<String, List<Student>> byDeptDiv = {};
+        // Build department-only grouping (e.g., CE:, IT:)
+        final Map<String, List<Student>> byDept = {};
         final records = byLecture[lectureKey]!;
-        // Avoid duplicate same student for same lecture (if somehow duplicated rows) - keep first
+        // Avoid duplicate same student for same lecture
         final seen = <int>{};
         for (var rec in records) {
           if (seen.contains(rec.studentId)) continue;
           seen.add(rec.studentId);
           final st = studentMap[rec.studentId];
           if (st == null) continue;
-          final key = '${st.department}-${st.division}';
-          byDeptDiv.putIfAbsent(key, () => []).add(st);
+          final key = st.department; // department only
+          byDept.putIfAbsent(key, () => []).add(st);
         }
 
-        final deptKeys = byDeptDiv.keys.toList()..sort();
+        final deptKeys = byDept.keys.toList()..sort();
         for (final dk in deptKeys) {
           sb.writeln(dk + ':');
-          final list = byDeptDiv[dk]!;
+          final list = byDept[dk]!;
           // Sort by numeric part of roll number if present
           list.sort((a, b) {
             final rx = RegExp(r'(\d+)');
@@ -265,17 +277,20 @@ class AttendanceProvider with ChangeNotifier {
             return a.rollNumber.compareTo(b.rollNumber);
           });
           for (final st in list) {
-            final m = RegExp(r':(\d+)').firstMatch(st.rollNumber);
-            final roll = m?.group(1) ?? st.rollNumber;
-            sb.writeln('  $roll: ${st.name}');
+            // Prefer digits after ':' like CE-B:01, else any first digits
+            final afterColon = RegExp(r':(\d+)').firstMatch(st.rollNumber);
+            String rollDigits = afterColon?.group(1) ?? (RegExp(r'(\d+)').firstMatch(st.rollNumber)?.group(1) ?? st.rollNumber);
+            // Remove leading zeros if numeric
+            final rollNum = int.tryParse(rollDigits);
+            final displayRoll = rollNum != null ? rollNum.toString() : rollDigits;
+            sb.writeln('$displayRoll: ${st.name}');
           }
           sb.writeln('');
         }
         headerIndex++;
       }
 
-      sb.writeln('Generated on: ${DateTime.now().toString().substring(0,16)}');
-      return sb.toString();
+      return sb.toString().trimRight();
     } catch (e) {
       return 'Error generating absentee report: $e';
     }
@@ -290,9 +305,8 @@ class AttendanceProvider with ChangeNotifier {
       final students = await DatabaseHelper.instance.getStudentsByCombinedClassOrdered(semester, department, division);
       final idSet = students.map((s) => s.id!).toSet();
 
-      final presentRecords = _attendanceRecords.where((r) => _formatDate(r.date) == date && r.isPresent && idSet.contains(r.studentId)).toList();
+      // Removed unused presentRecords and studentMap to avoid warnings
       final absentRecords = _attendanceRecords.where((r) => _formatDate(r.date) == date && !r.isPresent && idSet.contains(r.studentId)).toList();
-      final studentMap = {for (var s in students) s.id!: s};
 
       final sb = StringBuffer();
       if (reportType == 'present') {
@@ -396,4 +410,3 @@ class AttendanceProvider with ChangeNotifier {
     }
   }
 }
-

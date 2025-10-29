@@ -7,7 +7,9 @@ import '../providers/attendance_provider.dart';
 import '../services/database_helper.dart';
 
 class AttendanceScreen extends StatefulWidget {
-  const AttendanceScreen({super.key});
+  const AttendanceScreen({super.key, this.initialDate});
+
+  final DateTime? initialDate;
 
   @override
   State<AttendanceScreen> createState() => _AttendanceScreenState();
@@ -20,13 +22,27 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   String _selectedDivision = 'B';
   String? _selectedSubject;
   int? _selectedLectureNumber;
-  String _selectedTimeSlot = '8:00-8:50';
+  String? _selectedTimeSlot; // <- restored time slot selection
   List<Student> _filteredStudents = [];
   Map<int, bool> _attendanceStatus = {};
+
+  // UI additions
+  bool _isLoading = false;
+  String _searchQuery = '';
+  String _sortBy = 'roll'; // 'name' | 'roll'
+  String _statusFilter = 'all'; // 'all' | 'present' | 'absent'
 
   @override
   void initState() {
     super.initState();
+    // Apply deep-linked date if provided
+    if (widget.initialDate != null) {
+      final now = DateTime.now();
+      final d = widget.initialDate!;
+      if (!d.isAfter(now)) {
+        _selectedDate = d;
+      }
+    }
     // Use post-frame callback to safely access context
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadStudentsAndAttendance();
@@ -34,6 +50,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Future<void> _loadStudentsAndAttendance() async {
+    setState(() => _isLoading = true);
     final studentProvider = Provider.of<StudentProvider>(context, listen: false);
     final attendanceProvider = Provider.of<AttendanceProvider>(context, listen: false);
 
@@ -48,27 +65,83 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     _filterStudents();
     _loadAttendanceStatus();
+    if (mounted) setState(() => _isLoading = false);
   }
 
   String? _getLectureString() {
     if (_selectedSubject != null && _selectedLectureNumber != null) {
-      return '$_selectedSubject - Lecture $_selectedLectureNumber';
+      // include selected time slot in lecture string when available
+      final slot = _selectedTimeSlot != null ? ' • $_selectedTimeSlot' : '';
+      return '$_selectedSubject - Lecture $_selectedLectureNumber$slot';
     }
     return null;
   }
 
   void _filterStudents() {
     final studentProvider = Provider.of<StudentProvider>(context, listen: false);
+    List<Student> list = studentProvider.getStudentsByClass(
+      _selectedSemester,
+      _selectedDepartment,
+      _selectedDivision,
+    );
+
+    // Search by name or roll
+    if (_searchQuery.isNotEmpty) {
+      final q = _searchQuery.toLowerCase();
+      list = list.where((s) => s.name.toLowerCase().contains(q) || s.rollNumber.toLowerCase().contains(q)).toList();
+    }
+
+    // Apply status filter if we already have attendanceStatus
+    if (_statusFilter != 'all' && _attendanceStatus.isNotEmpty) {
+      if (_statusFilter == 'present') {
+        list = list.where((s) => _attendanceStatus[s.id!] ?? true).toList();
+      } else if (_statusFilter == 'absent') {
+        list = list.where((s) => !(_attendanceStatus[s.id!] ?? false)).toList();
+      }
+    }
+
+    int _compareCeItRoll(Student a, Student b) {
+      final ceitRegex = RegExp(r'^(CE|IT)-[A-Z]:(\d+)', caseSensitive: false);
+      final ma = ceitRegex.firstMatch(a.rollNumber.toUpperCase());
+      final mb = ceitRegex.firstMatch(b.rollNumber.toUpperCase());
+
+      if (ma != null && mb != null) {
+        final deptA = ma.group(1)!;
+        final deptB = mb.group(1)!;
+        if (deptA != deptB) return deptA == 'CE' ? -1 : 1;
+        final numA = int.tryParse(ma.group(2)!) ?? 0;
+        final numB = int.tryParse(mb.group(2)!) ?? 0;
+        return numA.compareTo(numB);
+      }
+
+      if (ma != null && mb == null) return -1;
+      if (ma == null && mb != null) return 1;
+
+      final numRegex = RegExp(r'(\d+)');
+      final ra = numRegex.firstMatch(a.rollNumber);
+      final rb = numRegex.firstMatch(b.rollNumber);
+      if (ra != null && rb != null) {
+        final na = int.tryParse(ra.group(1)!) ?? 0;
+        final nb = int.tryParse(rb.group(1)!) ?? 0;
+        return na.compareTo(nb);
+      }
+      return a.rollNumber.compareTo(b.rollNumber);
+    }
+
+    // Sort
+    list.sort((a, b) {
+      if (_sortBy == 'name') {
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      }
+      return _compareCeItRoll(a, b);
+    });
+
     setState(() {
-      _filteredStudents = studentProvider.getStudentsByClass(
-        _selectedSemester,
-        _selectedDepartment,
-        _selectedDivision,
-      );
-      // Reset attendance status for new list of students
-      _attendanceStatus = {
-        for (var student in _filteredStudents) student.id!: true
-      };
+      _filteredStudents = list;
+      // Reset attendance status map keys if it was empty
+      if (_attendanceStatus.isEmpty) {
+        _attendanceStatus = { for (var s in _filteredStudents) s.id!: true };
+      }
     });
   }
 
@@ -88,8 +161,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Future<void> _markAttendance(int studentId, bool isPresent) async {
-    // No need to call provider here, just update local state
-    // The final save will be done with the _saveAttendance method
     setState(() {
       _attendanceStatus[studentId] = isPresent;
     });
@@ -122,12 +193,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   List<String> _getSubjects() {
-    // This can be fetched from a provider or database in a real app
     return ['DCN', 'DS', 'Maths', 'ADBMS', 'OOP'];
   }
 
   List<Map<String, String>> _getTimeSlots() {
-    // Return the exact time slots requested by the user
     return [
       {'value': '8:00-8:50', 'label': '08:00 AM - 08:50 AM'},
       {'value': '8:50-9:45', 'label': '08:50 AM - 09:45 AM'},
@@ -190,266 +259,760 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
   }
 
+  Widget _buildSkeletonList() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: List.generate(8, (index) => Card(
+          margin: const EdgeInsets.only(bottom: 8),
+          child: Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: Row(
+              children: [
+                Container(width: 64, height: 40, decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(6))),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(height: 14, width: 160, color: Colors.grey.shade300),
+                      const SizedBox(height: 8),
+                      Container(height: 12, width: 220, color: Colors.grey.shade200),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Container(width: 24, height: 24, color: Colors.grey.shade300),
+                const SizedBox(width: 8),
+                Container(width: 24, height: 24, color: Colors.grey.shade300),
+              ],
+            ),
+          ),
+        )),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Take Attendance'),
+        title: const Text('Take Attendance', style: TextStyle(fontWeight: FontWeight.bold)),
         leading: IconButton(
-          icon: const Icon(Icons.home),
+          icon: const Icon(Icons.arrow_back),
           onPressed: () => context.go('/home'),
         ),
         actions: [
           IconButton(
             onPressed: _filteredStudents.isNotEmpty ? _saveAttendance : null,
-            icon: const Icon(Icons.save),
+            icon: const Icon(Icons.save_outlined),
             tooltip: 'Save Attendance',
           ),
-          PopupMenuButton<String>(
-            onSelected: (value) {
-              if (value == 'all_present') {
-                _markAllPresent();
-              } else if (value == 'all_absent') {
-                _markAllAbsent();
-              }
-            },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'all_present',
-                child: Text('Mark All Present'),
-              ),
-              const PopupMenuItem(
-                value: 'all_absent',
-                child: Text('Mark All Absent'),
-              ),
-            ],
+          IconButton(
+            icon: const Icon(Icons.notifications_outlined),
+            onPressed: () {},
           ),
         ],
+        elevation: 0,
       ),
-      body: Column(
-        children: [
-          // All selection filters are grouped into one card
-          Card(
-            margin: const EdgeInsets.all(16),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
+      floatingActionButton: _filteredStudents.isNotEmpty ? FloatingActionButton(
+        onPressed: () {
+          // Quick mark all action
+          showModalBottomSheet(
+            context: context,
+            builder: (context) => Container(
+              padding: const EdgeInsets.all(20),
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Date Selection
-                  Row(
-                    children: [
-                      const Icon(Icons.calendar_today, size: 20),
-                      const SizedBox(width: 8),
-                      const Text('Date: '),
-                      const Spacer(),
-                      TextButton(
-                        onPressed: () async {
-                          final date = await showDatePicker(
-                            context: context,
-                            initialDate: _selectedDate,
-                            firstDate: DateTime(2020),
-                            lastDate: DateTime.now(),
-                          );
-                          if (date != null) {
-                            setState(() => _selectedDate = date);
-                            _loadStudentsAndAttendance();
-                          }
-                        },
-                        child: Text(
-                          _selectedDate.toIso8601String().substring(0, 10),
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+                  ListTile(
+                    leading: const Icon(Icons.check_circle, color: Colors.green),
+                    title: const Text('Mark All Present'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _markAllPresent();
+                    },
                   ),
-                  const SizedBox(height: 16),
-                  // Class Selection
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<int>(
-                          decoration: const InputDecoration(labelText: 'Sem', border: OutlineInputBorder()),
-                          initialValue: _selectedSemester,
-                          items: DatabaseHelper.instance.getSemesters()
-                              .map((sem) => DropdownMenuItem(value: sem, child: Text('$sem')))
-                              .toList(),
-                          onChanged: (value) {
-                            if (value != null) {
-                              setState(() => _selectedSemester = value);
-                              _loadStudentsAndAttendance();
-                            }
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          decoration: const InputDecoration(labelText: 'Dept', border: OutlineInputBorder()),
-                          initialValue: _selectedDepartment,
-                          items: DatabaseHelper.instance.getDepartments()
-                              .map((dept) => DropdownMenuItem(value: dept, child: Text(dept)))
-                              .toList(),
-                          onChanged: (value) {
-                            if (value != null) {
-                              setState(() => _selectedDepartment = value);
-                              _loadStudentsAndAttendance();
-                            }
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          decoration: const InputDecoration(labelText: 'Div', border: OutlineInputBorder()),
-                          initialValue: _selectedDivision,
-                          items: DatabaseHelper.instance.getDivisions()
-                              .map((div) => DropdownMenuItem(value: div, child: Text(div)))
-                              .toList(),
-                          onChanged: (value) {
-                            if (value != null) {
-                              setState(() => _selectedDivision = value);
-                              _loadStudentsAndAttendance();
-                            }
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  // Subject and Lecture Number Selection
-                  Row(
-                    children: [
-                      Expanded(
-                        flex: 2,
-                        child: DropdownButtonFormField<String>(
-                          decoration: const InputDecoration(labelText: 'Subject', border: OutlineInputBorder()),
-                          initialValue: _selectedSubject,
-                          items: _getSubjects()
-                              .map((sub) => DropdownMenuItem(value: sub, child: Text(sub)))
-                              .toList(),
-                          onChanged: (value) {
-                            setState(() {
-                              _selectedSubject = value;
-                              if (value == null) _selectedLectureNumber = null;
-                            });
-                            _loadStudentsAndAttendance();
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: DropdownButtonFormField<int>(
-                          decoration: const InputDecoration(labelText: 'Lec No.', border: OutlineInputBorder()),
-                          initialValue: _selectedLectureNumber,
-                          items: List.generate(6, (i) => i + 1)
-                              .map((num) => DropdownMenuItem(value: num, child: Text('$num')))
-                              .toList(),
-                          onChanged: _selectedSubject != null ? (value) {
-                            setState(() => _selectedLectureNumber = value);
-                            _loadStudentsAndAttendance();
-                          } : null,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  // Time Slot Selection
-                  DropdownButtonFormField<String>(
-                    decoration: const InputDecoration(labelText: 'Time Slot', border: OutlineInputBorder()),
-                    initialValue: _selectedTimeSlot,
-                    items: _getTimeSlots()
-                        .map((ts) => DropdownMenuItem(value: ts['value'], child: Text(ts['label']!)))
-                        .toList(),
-                    onChanged: (value) {
-                      if (value != null) {
-                        setState(() => _selectedTimeSlot = value);
-                      }
+                  ListTile(
+                    leading: const Icon(Icons.cancel, color: Colors.red),
+                    title: const Text('Mark All Absent'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _markAllAbsent();
                     },
                   ),
                 ],
               ),
             ),
-          ),
-          // Attendance Summary
-          if (_filteredStudents.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Card(
-                elevation: 2,
+          );
+        },
+        child: const Icon(Icons.add),
+      ) : null,
+      body: RefreshIndicator(
+        onRefresh: _loadStudentsAndAttendance,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
+          children: [
+            // Date Selection Card
+            Card(
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: Colors.grey.shade300),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Icon(Icons.calendar_today, size: 20, color: Colors.grey.shade600),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Date',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _selectedDate.toIso8601String().substring(0, 10),
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () async {
+                        final date = await showDatePicker(
+                          context: context,
+                          initialDate: _selectedDate,
+                          firstDate: DateTime(2020),
+                          lastDate: DateTime.now(),
+                        );
+                        if (date != null) {
+                          setState(() => _selectedDate = date);
+                          _loadStudentsAndAttendance();
+                        }
+                      },
+                      icon: const Icon(Icons.edit_calendar),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Class Selection
+            Row(
+              children: [
+                Expanded(
+                  child: _buildFilterChip(
+                    label: 'Sem $_selectedSemester',
+                    onTap: () => _showSemesterPicker(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildFilterChip(
+                    label: _selectedDepartment,
+                    onTap: () => _showDepartmentPicker(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildFilterChip(
+                    label: 'Div $_selectedDivision',
+                    onTap: () => _showDivisionPicker(),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Subject and Lecture
+            Row(
+              children: [
+                Expanded(
+                  flex: 2,
+                  child: _buildFilterChip(
+                    label: _selectedSubject ?? 'Select Subject',
+                    onTap: () => _showSubjectPicker(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildFilterChip(
+                    label: _selectedLectureNumber != null ? 'Lec $_selectedLectureNumber' : 'Lec',
+                    onTap: _selectedSubject != null ? () => _showLecturePicker() : null,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            // Time Slot selector (restored)
+            Row(
+              children: [
+                Expanded(
+                  child: _buildFilterChip(
+                    label: _selectedTimeSlot ?? 'Select Time Slot',
+                    onTap: () => _showTimeSlotPicker(),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Search Bar
+            TextField(
+              decoration: InputDecoration(
+                hintText: 'Search by name or roll...',
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                filled: true,
+                fillColor: Colors.grey.shade50,
+              ),
+              onChanged: (v) {
+                setState(() => _searchQuery = v.trim());
+                _filterStudents();
+              },
+            ),
+            const SizedBox(height: 16),
+
+            // Status Filter Chips
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _buildStatusChip('All', 'all', Colors.grey),
+                  const SizedBox(width: 8),
+                  _buildStatusChip('Present', 'present', Colors.green),
+                  const SizedBox(width: 8),
+                  _buildStatusChip('Absent', 'absent', Colors.red),
+                  const SizedBox(width: 8),
+                  _buildStatusChip('Late', 'late', Colors.orange),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Sort Options
+            Row(
+              children: [
+                Expanded(
+                  child: ChoiceChip(
+                    label: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.onetwothree, size: 16),
+                        SizedBox(width: 4),
+                        Text('By Roll'),
+                      ],
+                    ),
+                    selected: _sortBy == 'roll',
+                    onSelected: (selected) {
+                      if (selected) {
+                        setState(() => _sortBy = 'roll');
+                        _filterStudents();
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ChoiceChip(
+                    label: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.sort_by_alpha, size: 16),
+                        SizedBox(width: 4),
+                        Text('By Name'),
+                      ],
+                    ),
+                    selected: _sortBy == 'name',
+                    onSelected: (selected) {
+                      if (selected) {
+                        setState(() => _sortBy = 'name');
+                        _filterStudents();
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Summary Card
+            if (_filteredStudents.isNotEmpty)
+              Card(
+                elevation: 0,
+                color: Colors.transparent,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(color: Colors.grey.shade200),
+                ),
                 child: Padding(
-                  padding: const EdgeInsets.all(12.0),
+                  padding: const EdgeInsets.all(16),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
-                      _buildSummaryColumn('Total', '${_filteredStudents.length}', Colors.black),
-                      _buildSummaryColumn('Present', '${_attendanceStatus.values.where((s) => s).length}', Colors.green),
-                      _buildSummaryColumn('Absent', '${_attendanceStatus.values.where((s) => !s).length}', Colors.red),
+                      _buildSummaryItem(
+                        'Total',
+                        '${_filteredStudents.length}',
+                        Colors.blue,
+                        Icons.people,
+                      ),
+                      Container(width: 1, height: 40, color: Colors.grey.shade300),
+                      _buildSummaryItem(
+                        'Present',
+                        '${_attendanceStatus.values.where((s) => s).length}',
+                        Colors.green,
+                        Icons.check_circle,
+                      ),
+                      Container(width: 1, height: 40, color: Colors.grey.shade300),
+                      _buildSummaryItem(
+                        'Absent',
+                        '${_attendanceStatus.values.where((s) => !s).length}',
+                        Colors.red,
+                        Icons.cancel,
+                      ),
                     ],
                   ),
                 ),
               ),
-            ),
-          // Student List
-          Expanded(
-            child: _filteredStudents.isEmpty
-                ? const Center(
-              child: Text(
-                'No students found for selected class.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.grey),
-              ),
-            )
-                : ListView.builder(
-              itemCount: _filteredStudents.length,
-              itemBuilder: (context, index) {
-                final student = _filteredStudents[index];
-                final isPresent = _attendanceStatus[student.id] ?? true;
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: ListTile(
-                    leading: Container(
-                      width: 64,
-                      height: 40,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: isPresent ? Colors.green.shade100 : Colors.red.shade100,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      padding: const EdgeInsets.symmetric(horizontal: 6),
-                      child: Text(
-                        student.rollNumber.toString(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: isPresent ? Colors.green.shade800 : Colors.red.shade800,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 12,
-                        ),
+            if (_filteredStudents.isNotEmpty) const SizedBox(height: 16),
+
+            // Section Header
+            if (!_isLoading && _filteredStudents.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Row(
+                  children: [
+                    Text(
+                      'Student List',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey.shade700,
                       ),
                     ),
-                    title: Text(student.name),
-                    subtitle: Text('ID: ${student.id}'),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          onPressed: () => _markAttendance(student.id!, true),
-                          icon: Icon(Icons.check_circle, color: isPresent ? Colors.green : Colors.grey),
-                          tooltip: 'Mark Present',
+                    const Spacer(),
+                    Text(
+                      '${_filteredStudents.length} students',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            // Student List or States
+            if (_isLoading)
+              _buildSkeletonList()
+            else if (_filteredStudents.isEmpty)
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(40.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.people_outline,
+                        size: 80,
+                        color: Colors.grey.shade300,
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No Students Found',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey.shade700,
                         ),
-                        IconButton(
-                          onPressed: () => _markAttendance(student.id!, false),
-                          icon: Icon(Icons.cancel, color: !isPresent ? Colors.red : Colors.grey),
-                          tooltip: 'Mark Absent',
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Try adjusting your filters or import students',
+                        style: TextStyle(
+                          color: Colors.grey.shade500,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 24),
+                      ElevatedButton.icon(
+                        onPressed: () => context.go('/students'),
+                        icon: const Icon(Icons.upload_file),
+                        label: const Text('Import Students'),
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            // Student cards
+            ..._filteredStudents.map((student) {
+              final isPresent = _attendanceStatus[student.id] ?? true;
+              return Card(
+                elevation: 0,
+                margin: const EdgeInsets.only(bottom: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(color: Colors.grey.shade200),
+                ),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => _markAttendance(student.id!, !isPresent),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        // Avatar with initial
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: isPresent
+                              ? Colors.green.shade50
+                              : Colors.red.shade50,
+                          child: Text(
+                            student.name.isNotEmpty
+                                ? student.name[0].toUpperCase()
+                                : 'S',
+                            style: TextStyle(
+                              color: isPresent
+                                  ? Colors.green.shade800
+                                  : Colors.red.shade800,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        // Student Info
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                student.name,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Roll: ${student.rollNumber}',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        // Present/Absent circular buttons
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildCircleToggle(isPresent, true, onTap: () => _markAttendance(student.id!, true)),
+                            const SizedBox(width: 8),
+                            _buildCircleToggle(!isPresent, false, onTap: () => _markAttendance(student.id!, false)),
+                          ],
                         ),
                       ],
                     ),
                   ),
-                );
-              },
+                ),
+              );
+            }).toList(),
+            const SizedBox(height: 20), // Bottom padding for submit button
+            // Submit attendance large CTA
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24.0),
+              child: ElevatedButton(
+                onPressed: _filteredStudents.isNotEmpty ? _saveAttendance : null,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                ),
+                child: const Text('Submit Attendance', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              ),
             ),
+
+            const SizedBox(height: 80), // Extra bottom padding
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilterChip({required String label, VoidCallback? onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey.shade300),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w500,
+                  fontSize: 14,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (onTap != null) ...[
+              const SizedBox(width: 4),
+              Icon(Icons.arrow_drop_down, size: 20, color: Colors.grey.shade600),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusChip(String label, String value, Color color) {
+    final isSelected = _statusFilter == value;
+    return FilterChip(
+      label: Text(label),
+      selected: isSelected,
+      onSelected: (selected) {
+        setState(() => _statusFilter = value);
+        _filterStudents();
+      },
+      backgroundColor: Colors.grey.shade100,
+      selectedColor: color.withOpacity(0.2),
+      checkmarkColor: color,
+      labelStyle: TextStyle(
+        color: isSelected ? color : Colors.grey.shade700,
+        fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+      ),
+      side: BorderSide(
+        color: isSelected ? color : Colors.grey.shade300,
+      ),
+    );
+  }
+
+  Widget _buildSummaryItem(String label, String count, Color color, IconData icon) {
+    return Column(
+      children: [
+        Icon(icon, color: color, size: 24),
+        const SizedBox(height: 8),
+        Text(
+          count,
+          style: TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: color,
           ),
-        ],
+        ),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: Colors.grey.shade600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCircleToggle(bool active, bool positive, {required VoidCallback onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(28),
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: active ? (positive ? Colors.green.shade50 : Colors.red.shade50) : Colors.grey.shade100,
+          shape: BoxShape.circle,
+          border: Border.all(color: active ? (positive ? Colors.green : Colors.red) : Colors.grey.shade300, width: active ? 2 : 1),
+        ),
+        child: Center(
+          child: Icon(
+            positive ? Icons.check : Icons.close,
+            color: active ? (positive ? Colors.green.shade800 : Colors.red.shade800) : Colors.grey.shade600,
+            size: 20,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Picker methods
+  void _showSemesterPicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: DatabaseHelper.instance.getSemesters().map((sem) {
+            return ListTile(
+              title: Text('Semester $sem'),
+              trailing: _selectedSemester == sem ? const Icon(Icons.check) : null,
+              onTap: () {
+                setState(() => _selectedSemester = sem);
+                _loadStudentsAndAttendance();
+                Navigator.pop(context);
+              },
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  void _showDepartmentPicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: DatabaseHelper.instance.getDepartments().map((dept) {
+            return ListTile(
+              title: Text(dept),
+              trailing: _selectedDepartment == dept ? const Icon(Icons.check) : null,
+              onTap: () {
+                setState(() => _selectedDepartment = dept);
+                _loadStudentsAndAttendance();
+                Navigator.pop(context);
+              },
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  void _showDivisionPicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: DatabaseHelper.instance.getDivisions().map((div) {
+            return ListTile(
+              title: Text('Division $div'),
+              trailing: _selectedDivision == div ? const Icon(Icons.check) : null,
+              onTap: () {
+                setState(() => _selectedDivision = div);
+                _loadStudentsAndAttendance();
+                Navigator.pop(context);
+              },
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  void _showSubjectPicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: _getSubjects().map((subject) {
+            return ListTile(
+              title: Text(subject),
+              trailing: _selectedSubject == subject ? const Icon(Icons.check) : null,
+              onTap: () {
+                setState(() {
+                  _selectedSubject = subject;
+                  _selectedLectureNumber = null;
+                });
+                _loadStudentsAndAttendance();
+                Navigator.pop(context);
+              },
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  void _showLecturePicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(6, (i) => i + 1).map((num) {
+            return ListTile(
+              title: Text('Lecture $num'),
+              trailing: _selectedLectureNumber == num ? const Icon(Icons.check) : null,
+              onTap: () {
+                setState(() => _selectedLectureNumber = num);
+                _loadStudentsAndAttendance();
+                Navigator.pop(context);
+              },
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  void _showTimeSlotPicker() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: _getTimeSlots().map((m) {
+            return ListTile(
+              title: Text(m['label'] ?? m['value']!),
+              trailing: _selectedTimeSlot == m['value'] ? const Icon(Icons.check) : null,
+              onTap: () {
+                setState(() => _selectedTimeSlot = m['value']);
+                _loadStudentsAndAttendance();
+                Navigator.pop(context);
+              },
+            );
+          }).toList(),
+        ),
       ),
     );
   }

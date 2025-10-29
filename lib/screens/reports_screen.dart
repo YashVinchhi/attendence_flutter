@@ -9,6 +9,7 @@ import '../providers/report_provider.dart';
 import '../providers/student_provider.dart';
 import '../providers/attendance_provider.dart';
 import '../services/database_helper.dart';
+import '../services/navigation_service.dart';
 
 class ReportsScreen extends StatefulWidget {
   const ReportsScreen({super.key});
@@ -72,6 +73,29 @@ class _ReportsScreenState extends State<ReportsScreen> {
 
   // New method to share different types of daily attendance reports
   Future<void> _shareFormattedAttendanceReport(String reportType) async {
+    if (!mounted) return;
+
+    final navigationService = Provider.of<NavigationService>(context, listen: false);
+
+    // Show loading dialog (do not await)
+    navigationService.showDialogSafely(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (loadingContext) => PopScope(
+        canPop: false,
+        child: const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Expanded(child: Text('Generating report...')),
+            ],
+          ),
+        ),
+      ),
+    );
+
     try {
       final attendanceProvider = Provider.of<AttendanceProvider>(context, listen: false);
 
@@ -96,55 +120,74 @@ class _ReportsScreenState extends State<ReportsScreen> {
           reportTitle = 'Daily Absentee Report';
       }
 
+      if (!mounted) return;
+
+      // Close loading dialog
+      await navigationService.popDialog(context, useRootNavigator: true);
+
+      // Add delay before sharing
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      if (!mounted) return;
+
       await Share.share(
         formattedReport,
         subject: '$reportTitle - $_selectedSemester$_selectedClassType-$_selectedDivision',
       );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error sharing $reportType report: $e')),
-      );
+      if (mounted) {
+        // Close loading dialog if still showing
+        await navigationService.popDialog(context, useRootNavigator: true);
+
+        await Future.delayed(const Duration(milliseconds: 200));
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error sharing $reportType report: $e')),
+          );
+        }
+      }
     }
   }
 
   // Show dialog to choose report type
-  void _showDailyReportOptions() {
-    showDialog(
+  Future<void> _showDailyReportOptions() async {
+    final String? reportType = await showDialog<String>(
       context: context,
-      builder: (BuildContext context) {
+      useRootNavigator: true,
+      builder: (BuildContext dialogContext) {
         return AlertDialog(
           title: const Text('Choose Report Type'),
           content: const Text('What type of daily attendance report would you like to share?'),
           actions: [
             TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _shareFormattedAttendanceReport('absentees');
-              },
+              onPressed: () => Navigator.of(dialogContext).pop('absentees'),
               child: const Text('Absent Students Only'),
             ),
             TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _shareFormattedAttendanceReport('present');
-              },
+              onPressed: () => Navigator.of(dialogContext).pop('present'),
               child: const Text('Present Students Only'),
             ),
             TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _shareFormattedAttendanceReport('all');
-              },
+              onPressed: () => Navigator.of(dialogContext).pop('all'),
               child: const Text('Complete Report (All Students)'),
             ),
             TextButton(
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: () => Navigator.of(dialogContext).pop(),
               child: const Text('Cancel'),
             ),
           ],
         );
       },
     );
+
+    if (reportType != null && mounted) {
+      // Add a small delay to ensure the dialog is fully closed
+      await Future.delayed(const Duration(milliseconds: 200));
+      if (mounted) {
+        await _shareFormattedAttendanceReport(reportType);
+      }
+    }
   }
 
   Future<void> _shareReport() async {
@@ -316,6 +359,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                           children: [
                             Expanded(
                               child: DropdownButtonFormField<int>(
+                                isExpanded: true,
                                 decoration: const InputDecoration(
                                   labelText: 'Semester',
                                   border: OutlineInputBorder(),
@@ -323,7 +367,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                 initialValue: _selectedSemester,
                                 items: dbHelper.getSemesters().map((sem) => DropdownMenuItem(
                                   value: sem,
-                                  child: Text('Sem $sem'),
+                                  child: Text('Sem $sem', overflow: TextOverflow.ellipsis),
                                 )).toList(),
                                 onChanged: (value) {
                                   if (value != null) {
@@ -335,6 +379,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                             const SizedBox(width: 12),
                             Expanded(
                               child: DropdownButtonFormField<String>(
+                                isExpanded: true,
                                 decoration: const InputDecoration(
                                   labelText: 'Class Type',
                                   border: OutlineInputBorder(),
@@ -342,7 +387,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                 initialValue: _selectedClassType,
                                 items: dbHelper.getCombinedDepartments().map((dept) => DropdownMenuItem(
                                   value: dept,
-                                  child: Text(dept),
+                                  child: Text(dept, overflow: TextOverflow.ellipsis),
                                 )).toList(),
                                 onChanged: (value) {
                                   if (value != null) {
@@ -354,6 +399,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                             const SizedBox(width: 12),
                             Expanded(
                               child: DropdownButtonFormField<String>(
+                                isExpanded: true,
                                 decoration: const InputDecoration(
                                   labelText: 'Division',
                                   border: OutlineInputBorder(),
@@ -361,7 +407,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                 initialValue: _selectedDivision,
                                 items: dbHelper.getDivisions().map((div) => DropdownMenuItem(
                                   value: div,
-                                  child: Text('Div $div'),
+                                  child: Text('Div $div', overflow: TextOverflow.ellipsis),
                                 )).toList(),
                                 onChanged: (value) {
                                   if (value != null) {
@@ -389,6 +435,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                               initialDate: _selectedReportDate,
                               firstDate: DateTime(2020),
                               lastDate: DateTime.now(),
+                              useRootNavigator: true,
                             );
                             if (date != null) {
                               setState(() => _selectedReportDate = date);
@@ -494,6 +541,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                     initialDate: _fromDate,
                                     firstDate: DateTime(2020),
                                     lastDate: DateTime.now(),
+                                    useRootNavigator: true,
                                   );
                                   if (date != null) {
                                     setState(() => _fromDate = date);
@@ -520,6 +568,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                     initialDate: _toDate,
                                     firstDate: _fromDate,
                                     lastDate: DateTime.now(),
+                                    useRootNavigator: true,
                                   );
                                   if (date != null) {
                                     setState(() => _toDate = date);

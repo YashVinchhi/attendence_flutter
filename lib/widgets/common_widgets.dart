@@ -201,6 +201,7 @@ class ConfirmationDialog extends StatelessWidget {
   }) {
     return showDialog<bool>(
       context: context,
+      useRootNavigator: true,
       builder: (context) => ConfirmationDialog(
         title: title,
         message: message,
