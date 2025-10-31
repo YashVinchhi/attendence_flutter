@@ -18,15 +18,10 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-<<<<<<< HEAD
           # Pin to a modern stable Flutter that matches Dart 3.x and AGP 8.x
           flutter-version: '3.24.4'
       - name: Flutter version
         run: flutter --version
-=======
-          # Pin to a concrete Flutter version to avoid channel resolution issues
-          flutter-version: '3.10.6'
->>>>>>> 9118324dd5ef2cbba5cfeb15d5c3b064d2db1e5c
       - name: Install dependencies
         run: flutter pub get
       - name: Run analyzer
