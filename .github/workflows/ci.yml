@@ -18,15 +18,10 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          # Pin to a concrete Flutter version to avoid channel resolution issues
-          flutter-version: '3.10.6'
-      - name: Strip dev_dependencies for CI (temporary)
-        run: |
-          echo "Removing dev_dependencies from pubspec.yaml for CI run"
-          awk 'BEGIN{skip=0} /^dev_dependencies:/{skip=1;next} skip==1 && (/^[^[:space:]]/){skip=0} skip==1{next} {print}' pubspec.yaml > pubspec.ci.yaml
-          mv pubspec.ci.yaml pubspec.yaml
-          echo "Modified pubspec.yaml (dev_dependencies removed):"
-          sed -n '1,120p' pubspec.yaml || true
+          # Pin to a modern stable Flutter that matches Dart 3.x and AGP 8.x
+          flutter-version: '3.24.4'
+      - name: Flutter version
+        run: flutter --version
       - name: Install dependencies
         run: flutter pub get
       - name: Run analyzer
