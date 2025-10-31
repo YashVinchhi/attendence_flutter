@@ -19,7 +19,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           # Pin to a modern stable Flutter that matches Dart 3.x and AGP 8.x
-          flutter-version: '3.24.4'
+          flutter-version: '3.35.7'
       - name: Flutter version
         run: flutter --version
       - name: Install dependencies
