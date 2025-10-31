@@ -29,10 +29,10 @@ const authUsersToSeed = [
 ];
 
 // 3. Initialize the Firebase Admin App
-// Using a dummy project ID, as it's just for the emulator
+// Use your project ID to match the emulator
 try {
     admin.initializeApp({
-        projectId: 'demo-project-local',
+        projectId: 'attendance-b9f1a',
     });
 } catch (e) {
     // This handles the "app already initialized" error
@@ -95,4 +95,5 @@ async function seedAuth() {
 
 // 7. Run the seed function
 seedAuth();
+
 

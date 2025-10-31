@@ -31,6 +31,18 @@ jobs:
         run: |
           flutter --version
           java -version
+
+      - name: "Ensure Android SDK (API 36)"
+        run: |
+          set -e
+          SDKROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses || true
+            yes | "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" || true
+          else
+            echo "sdkmanager not found at $SDKMANAGER; skipping explicit Android SDK install"
+          fi
       - name: "Install dependencies"
         run: flutter pub get
 

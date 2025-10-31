@@ -59,3 +59,5 @@ Thumbs.db
 # Ignore all markdown files but keep the project's root README.md tracked
 **/*.md
 !/README.md
+functions/seed_emulator.js
+functions/seed_auth_emulator.js
