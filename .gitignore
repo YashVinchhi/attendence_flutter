@@ -1,6 +1,5 @@
 # Flutter
 **/build/
-**/ios/Flutter/App.framework
 **/.dart_tool/
 **/.idea/
 **/.packages
@@ -11,14 +10,52 @@
 **/android/key.properties
 **/ios/Runner/GoogleService-Info.plist
 **/.vscode/
+**/windows/Flutter/ephemeral/
+**/ios/Flutter/ephemeral/
 
-# Files created by the IDE
-*.iml
-.idea/
-.vscode/
+# Firebase functions local
+functions/.firebase/
 
-# Misc
+# macOS
 .DS_Store
-*.class
+
+# Logs
 *.log
 
+# Packages
+.packages
+
+# Generated
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Local secret files
+.env
+.secret
+
+# Misc
+.idea/
+*.iml
+.vscode/
+
+# Node
+node_modules/
+package-lock.json
+
+# Coverage
+coverage/
+
+# Build outputs
+build/
+
+# Windows
+Thumbs.db
+
+# Linux
+*.local
+
+# Others
+.cache/
+# Ignore all markdown files but keep the project's root README.md tracked
+**/*.md
+!/README.md
