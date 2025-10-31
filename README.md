@@ -22,8 +22,24 @@ A comprehensive attendance management system built with Flutter for educational 
 - 📅 Track attendance by date, lecture, and class
 - 📊 Generate formatted absentee and attendance reports
 - 📈 View per-day and date-range attendance statistics
-- 💾 SQLite local database for offline support
-- 🗂️ Organized codebase with providers, models, services, and screens
+- 💾 SQLite local database for offline support (local cache + sync-friendly design)
+- 🔐 Firebase Authentication integration: users created with Firebase Auth now get a corresponding Firestore `users/{uid}` profile (written by client) so auth and profile stay in sync.
+- ♻️ Resilient profile writes: when Firestore writes fail (network/permission), profile payloads are persisted locally as `pending_profile_{uid}` and retried automatically in background when connectivity returns.
+- ⏱ Connectivity-aware background retry: app periodically checks connectivity and retries pending profile writes automatically.
+- 🛠 Manage roles UI: HOD can manage Class Coordinators (CCs) and HOD/CC can manage Class Representatives (CRs) via dedicated screens. These screens show live Firestore data and any pending local entries (marked as "(pending)").
+- 📱 Sign-up UX: Create-account screen is scrollable to avoid RenderFlex overflow on small screens or when the keyboard is visible.
+- ⚠️ Security: client writes intentionally avoid admin-only fields (`is_active`, `permissions`, etc.). Privileged role changes are expected to be performed by HOD/Admin or a trusted backend (Cloud Function) in production.
+
+## How the new auth/profile flow works (brief)
+1. User signs up using Firebase Authentication.
+2. The app writes a Firestore document at `users/{uid}` using the Auth UID as document ID. The client only writes non-privileged fields: `uid`, `email`, `name`, `department`, `division`, `year`, `role`, `created_at` (server timestamp).
+3. If the Firestore write fails, the app saves the profile JSON into SharedPreferences under `pending_profile_{uid}` and retries automatically later via a connectivity-aware background loop.
+4. The Home debug UI includes tools to inspect and retry pending profiles manually.
+
+## Manage CCs / CRs screens
+- Manage CCs: HOD users can view all `role == 'CC'`, search users by email, assign CC, and revoke CC.
+- Manage CRs: HOD and CC users can view/assign/revoke `role == 'CR'` for students.
+- Both screens merge locally pending profiles into the displayed lists and mark them as `(pending)` so the UI reflects eventual state.
 
 ## 🗂️ Folder Structure
 
@@ -129,3 +145,23 @@ See [Releases](https://github.com/YashVinchhi/attendence_flutter/releases) for v
 
 ## 💬 Support
 For any queries or support, contact [yashhvinchhi@gmail.com].
+
+---
+
+## CI / Releases
+- This repository includes a GitHub Actions workflow that builds both an APK and an AAB on pushes to `main`. The workflow creates a GitHub Release and uploads the built artifacts as assets so team members can download the APK directly from:
+
+```
+https://github.com/YashVinchhi/attendence_flutter/releases/latest/download/app-release.apk
+```
+
+and the AAB via:
+
+```
+https://github.com/YashVinchhi/attendence_flutter/releases/latest/download/app-release.aab
+```
+
+If you prefer not to publish to Play Store, the workflow can be used to distribute builds internally via Releases.
+
+## Developer notes & clean-up guidance
+The repo contains some platform-specific and local files that should not be tracked by GitHub (build outputs, local IDE configs, generated files). Below is a helper `CLEAN_REMOTE.md` with exact git commands you can run locally to remove these from the remote history while keeping them on your PC. This keeps the repo lightweight while preserving your local environment.
