@@ -4,7 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 enum SettingsProviderState { idle, loading, error }
 
 class SettingsProvider with ChangeNotifier {
-  String _schoolName = 'Your School Name';
+  String _schoolName = 'SOE RKU';
   String _academicYear = '2024-25';
   bool _showPercentageInList = true;
   int _minimumAttendancePercentage = 75;
@@ -69,7 +69,7 @@ class SettingsProvider with ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
 
-      _schoolName = prefs.getString('school_name') ?? 'Your School Name';
+      _schoolName = prefs.getString('school_name') ?? 'SOE RKU';
       _academicYear = prefs.getString('academic_year') ?? _generateCurrentAcademicYear();
       _showPercentageInList = prefs.getBool('show_percentage_in_list') ?? true;
       _minimumAttendancePercentage = prefs.getInt('minimum_attendance_percentage') ?? 75;
@@ -244,7 +244,7 @@ class SettingsProvider with ChangeNotifier {
 
   // Reset settings to defaults
   Future<void> resetToDefaults() async {
-    _schoolName = 'Your School Name';
+    _schoolName = 'SOE RKU';
     _academicYear = _generateCurrentAcademicYear();
     _showPercentageInList = true;
     _minimumAttendancePercentage = 75;

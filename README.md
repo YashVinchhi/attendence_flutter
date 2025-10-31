@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/yourusername/attendance_flutter/releases/latest/download/app-release.apk">
+  <a href="https://github.com/YashVinchhi/attendence_flutter/releases/latest/download/app-release.apk">
     <img src="https://img.shields.io/badge/Download-APK-blue?logo=android" alt="Download APK"/>
   </a>
   <br>
@@ -45,8 +45,8 @@ test/             # Unit and widget tests
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/attendance_flutter.git
-   cd attendance_flutter
+   git clone https://github.com/YashVinchhi/attendence_flutter.git
+   cd attendence_flutter
    ```
 2. **Install dependencies**
    ```bash
@@ -61,7 +61,7 @@ test/             # Unit and widget tests
 
 ## 📦 APK Download
 
-- Download the latest release APK: [Download APK](https://github.com/yvinchhi/attendence/releases/download/v1.0.0/app-release.apk)
+- Download the latest release APK: [Download APK](https://github.com/YashVinchhi/attendence_flutter/releases/latest/download/app-release.apk)
 - To update the APK:
   1. Build your APK: `flutter build apk --release`
   2. Upload `build/app/outputs/apk/release/app-release.apk` to your GitHub Release page.
@@ -102,7 +102,7 @@ A: Yes, you can generate and export formatted reports from the app.
 ## 🧰 Troubleshooting
 - If you encounter issues running the app, ensure your Flutter SDK is up to date.
 - For database errors, try clearing app data or reinstalling.
-- Check [GitHub Issues](https://github.com/yourusername/attendance_flutter/issues) for known problems.
+- Check [GitHub Issues](https://github.com/YashVinchhi/attendence_flutter/issues) for known problems.
 
 ---
 
@@ -117,15 +117,15 @@ This project is licensed under the MIT License.
 ---
 
 ## 🙏 Credits
-- Developed by Yash Vinchhi
+- Developed by Yash VInchhi (https://github.com/YashVinchhi)
 - Special thanks to contributors and open-source Flutter community
 
 ---
 
 ## 📝 Changelog
-See [Releases](https://github.com/yourusername/attendance_flutter/releases) for version history and updates.
+See [Releases](https://github.com/YashVinchhi/attendence_flutter/releases) for version history and updates.
 
 ---
 
 ## 💬 Support
-For any queries or support, contact [your.email@example.com].
+For any queries or support, contact [yashhvinchhi@gmail.com].

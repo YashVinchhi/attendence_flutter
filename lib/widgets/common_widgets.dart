@@ -229,7 +229,7 @@ class SnackBarHelper {
             Expanded(child: Text(message)),
           ],
         ),
-        backgroundColor: Colors.green,
+        backgroundColor: Theme.of(context).colorScheme.primary,
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -301,7 +301,7 @@ class LoadingOverlay extends StatelessWidget {
         child,
         if (isLoading)
           Container(
-            color: Colors.black54,
+            color: Theme.of(context).colorScheme.scrim,
             child: LoadingWidget(message: loadingText),
           ),
       ],

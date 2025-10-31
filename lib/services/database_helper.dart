@@ -19,12 +19,67 @@ class DatabaseHelper {
     final dbPath = await getDatabasesPath();
     final path = join(dbPath, filePath);
 
-    return await openDatabase(
+    // Open database first
+    final db = await openDatabase(
       path,
       version: 4, // Incremented version to trigger migration for lecture field
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
+
+    // Ensure required columns/indexes exist for older DBs that may already be at
+    // the current version number but were created without the newer columns.
+    try {
+      await _ensureColumnsExist(db);
+    } catch (e) {
+      // Non-fatal: log and continue. Worst-case behavior will surface as DB errors.
+      print('Warning: _ensureColumnsExist failed: $e');
+    }
+
+    return db;
+  }
+
+  // Ensure missing columns (non-destructive) are added when needed even if DB
+  // version matches. This covers the case where a DB was created without the
+  // newer columns but its version already equals the runtime version.
+  Future<void> _ensureColumnsExist(Database db) async {
+    Future<bool> _columnExists(String table, String column) async {
+      try {
+        final info = await db.rawQuery('PRAGMA table_info("$table")');
+        for (final row in info) {
+          final name = row['name']?.toString();
+          if (name == column) return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+
+    // students.time_slot
+    try {
+      if (!await _columnExists('students', 'time_slot')) {
+        await db.execute('ALTER TABLE students ADD COLUMN time_slot TEXT NOT NULL DEFAULT "8:00-8:50"');
+      }
+    } catch (e) {
+      print('Could not add students.time_slot column in _ensureColumnsExist: $e');
+    }
+
+    // attendance.time_slot
+    try {
+      if (!await _columnExists('attendance', 'time_slot')) {
+        await db.execute('ALTER TABLE attendance ADD COLUMN time_slot TEXT DEFAULT ""');
+      }
+    } catch (e) {
+      print('Could not add attendance.time_slot column in _ensureColumnsExist: $e');
+    }
+
+    // Ensure indexes exist (safe to call)
+    try {
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_students_roll_number ON students(roll_number)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance(student_id, date)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_attendance_lecture ON attendance(lecture)');
+    } catch (e) {
+      print('Could not ensure indexes in _ensureColumnsExist: $e');
+    }
   }
 
   Future _createDB(Database db, int version) async {
@@ -53,6 +108,7 @@ class DatabaseHelper {
         is_present $integerType,
         notes TEXT,
         lecture TEXT,
+        time_slot TEXT,
         created_at TEXT,
         updated_at TEXT,
         FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE
@@ -66,24 +122,90 @@ class DatabaseHelper {
   }
 
   Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 2) {
-      // Migration from version 1 to 2
-      // Drop existing tables and recreate with proper schema
-      await db.execute('DROP TABLE IF EXISTS attendance');
-      await db.execute('DROP TABLE IF EXISTS students');
+    // Perform incremental, non-destructive migrations where possible.
+    // We guard each migration step with try/catch so upgrades never fail catastrophically.
+    try {
+      // Ensure attendance and students tables exist (create if missing)
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS students (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          roll_number TEXT NOT NULL UNIQUE,
+          semester INTEGER NOT NULL,
+          department TEXT NOT NULL,
+          division TEXT NOT NULL,
+          time_slot TEXT NOT NULL DEFAULT "8:00-8:50",
+          created_at TEXT
+        )
+      ''');
 
-      // Recreate tables with correct schema
-      await _createDB(db, newVersion);
-    } else if (oldVersion < 3) {
-      // Migration from version 2 to 3
-      // Add lecture field to attendance table
-      await db.execute('ALTER TABLE attendance ADD COLUMN lecture TEXT');
-      await db.execute('ALTER TABLE attendance ADD COLUMN created_at TEXT');
-      await db.execute('ALTER TABLE attendance ADD COLUMN updated_at TEXT');
-      await db.execute('CREATE INDEX idx_attendance_lecture ON attendance(lecture)');
-    } else if (oldVersion < 4) {
-      // Add time_slot column if it doesn't exist
-      await db.execute('ALTER TABLE students ADD COLUMN time_slot TEXT NOT NULL DEFAULT "8:00-8:50"');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS attendance (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          student_id INTEGER NOT NULL,
+          date TEXT,
+          is_present INTEGER,
+          notes TEXT,
+          lecture TEXT,
+          time_slot TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE
+        )
+      ''');
+
+      // Add indexes if missing (CREATE INDEX IF NOT EXISTS is supported)
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_students_roll_number ON students(roll_number)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance(student_id, date)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_attendance_lecture ON attendance(lecture)');
+    } catch (e) {
+      // If any of the safe-create steps fail, continue — avoid aborting upgrade.
+      print('Non-destructive migration create/index step failed: $e');
+    }
+
+    // Add column migrations for older databases. We check using PRAGMA table_info.
+    Future<bool> _columnExists(Database db, String table, String column) async {
+      try {
+        final info = await db.rawQuery('PRAGMA table_info(\'$table\')');
+        for (final row in info) {
+          final name = row['name']?.toString();
+          if (name == column) return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+
+    try {
+      if (oldVersion < 3) {
+        // Ensure attendance has lecture, created_at, updated_at
+        if (!await _columnExists(db, 'attendance', 'lecture')) {
+          try {
+            await db.execute('ALTER TABLE attendance ADD COLUMN lecture TEXT');
+          } catch (e) {
+            print('Could not add attendance.lecture column: $e');
+          }
+        }
+        if (!await _columnExists(db, 'attendance', 'time_slot')) {
+          try {
+            await db.execute('ALTER TABLE attendance ADD COLUMN time_slot TEXT DEFAULT ""');
+          } catch (e) {
+            print('Could not add attendance.time_slot column: $e');
+          }
+        }
+      }
+
+      if (oldVersion < 4) {
+        // Ensure students table has time_slot
+        if (!await _columnExists(db, 'students', 'time_slot')) {
+          try {
+            await db.execute('ALTER TABLE students ADD COLUMN time_slot TEXT NOT NULL DEFAULT "8:00-8:50"');
+          } catch (e) {
+            print('Could not add students.time_slot column: $e');
+          }
+        }
+      }
+    } catch (e) {
+      print('Migration check failed: $e');
     }
   }
 
@@ -343,6 +465,11 @@ class DatabaseHelper {
       await txn.delete('attendance');
       await txn.delete('students');
     });
+    // Mark that the user cleared data so loadSampleData won't auto-reload samples
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('user_cleared_data', true);
+    } catch (_) {}
   }
 
   Future<int> deleteStudent(int id) async {
@@ -371,7 +498,7 @@ class DatabaseHelper {
   }
 
   // Get attendance by date and lecture
-  Future<List<AttendanceRecord>> getAttendanceByDateAndLecture(String date, String? lecture) async {
+  Future<List<AttendanceRecord>> getAttendanceByDateAndLecture(String date, String? lecture, {String? timeSlot}) async {
     final db = await instance.database;
     String whereClause = 'date = ?';
     List<dynamic> whereArgs = [date];
@@ -379,6 +506,10 @@ class DatabaseHelper {
     if (lecture != null && lecture.isNotEmpty) {
       whereClause += ' AND lecture = ?';
       whereArgs.add(lecture);
+    }
+    if (timeSlot != null && timeSlot.isNotEmpty) {
+      whereClause += ' AND time_slot = ?';
+      whereArgs.add(timeSlot);
     }
 
     final result = await db.query(
@@ -390,7 +521,7 @@ class DatabaseHelper {
   }
 
   // Get attendance record with lecture filter
-  Future<AttendanceRecord?> getAttendanceRecordWithLecture(int studentId, String date, String? lecture) async {
+  Future<AttendanceRecord?> getAttendanceRecordWithLecture(int studentId, String date, String? lecture, {String? timeSlot}) async {
     final db = await instance.database;
     String whereClause = 'student_id = ? AND date = ?';
     List<dynamic> whereArgs = [studentId, date];
@@ -398,6 +529,11 @@ class DatabaseHelper {
     if (lecture != null && lecture.isNotEmpty) {
       whereClause += ' AND lecture = ?';
       whereArgs.add(lecture);
+    }
+
+    if (timeSlot != null && timeSlot.isNotEmpty) {
+      whereClause += ' AND time_slot = ?';
+      whereArgs.add(timeSlot);
     }
 
     final result = await db.query(
@@ -583,9 +719,9 @@ class DatabaseHelper {
     ''', [studentId, fromDate, toDate]);
 
     final data = result.first;
-    final total = data['total'] as int;
-    final present = data['present'] as int;
-    final absent = data['absent'] as int;
+    final total = (data['total'] is int) ? data['total'] as int : int.tryParse('${data['total']}') ?? 0;
+    final present = (data['present'] is int) ? data['present'] as int : int.tryParse('${data['present']}') ?? 0;
+    final absent = (data['absent'] is int) ? data['absent'] as int : int.tryParse('${data['absent']}') ?? 0;
     final percentage = total > 0 ? (present / total) * 100 : 0.0;
 
     return {

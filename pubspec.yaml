@@ -22,20 +22,20 @@ dependencies:
   shimmer: ^3.0.0
 
   # Navigation
-  go_router: ^12.1.3
+  go_router: ^16.3.0
 
   # Database
   sqflite: ^2.3.0
   path: ^1.8.3
 
   # File operations - using a more compatible version
-  file_picker: ^8.0.0+1
+  file_picker: ^10.3.3
 
   # CSV handling
   csv: ^6.0.0
 
   # Sharing functionality
-  share_plus: ^7.2.2
+  share_plus: ^12.0.1
 
   # URL launching
   url_launcher: ^6.2.2
@@ -44,16 +44,39 @@ dependencies:
   path_provider: ^2.1.2
 
   # Permissions
-  permission_handler: ^11.2.0
+  permission_handler: ^12.0.1
 
   # Shared preferences for storing user settings
   shared_preferences: ^2.2.2
+
+  # Firebase packages required for invite flows
+  firebase_core: ^3.15.2
+  firebase_auth: ^5.7.0
+  cloud_firestore: ^5.6.12
+  cloud_functions: ^5.6.2
+  firebase_dynamic_links: ^6.1.10
+  uuid: ^4.0.7
+
+  # Crypto for sha256 hashing when creating invite fallback locally
+  crypto: ^3.0.2
+
+  # Connectivity detection for background retry of pending profiles
+  connectivity_plus: ^4.0.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
-  flutter_lints: ^3.0.0
+  flutter_lints: ^6.0.0
+  sqflite_common_ffi: ^2.3.6
+  flutter_launcher_icons: ^0.14.4
+
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/LOGO.png"
+  adaptive_icon_background: "assets/LOGO.png"
+  adaptive_icon_foreground: "assets/LOGO.png"
 
 flutter:
   uses-material-design: true

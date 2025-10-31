@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:cross_file/cross_file.dart';
 import 'package:csv/csv.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
@@ -60,10 +61,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
         _selectedDivision,
       );
 
-      await Share.share(
-        formattedReport,
-        subject: 'Daily Absentee Report - $_selectedSemester$_selectedClassType-$_selectedDivision',
-      );
+      // ignore: deprecated_member_use
+      await Share.share(formattedReport, subject: 'Daily Absentee Report - $_selectedSemester$_selectedClassType-$_selectedDivision');
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error sharing absentee report: $e')),
@@ -130,10 +129,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
 
       if (!mounted) return;
 
-      await Share.share(
-        formattedReport,
-        subject: '$reportTitle - $_selectedSemester$_selectedClassType-$_selectedDivision',
-      );
+      // ignore: deprecated_member_use
+      await Share.share(formattedReport, subject: '$reportTitle - $_selectedSemester$_selectedClassType-$_selectedDivision');
     } catch (e) {
       if (mounted) {
         // Close loading dialog if still showing
@@ -223,11 +220,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
       await file.writeAsString(csvString);
 
       // Share the file
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        text: 'Attendance Report from ${_fromDate.toIso8601String().substring(0, 10)} to ${_toDate.toIso8601String().substring(0, 10)}',
-        subject: 'Attendance Report',
-      );
+      // ignore: deprecated_member_use
+      await Share.shareXFiles([XFile(file.path)], text: 'Attendance Report from ${_fromDate.toIso8601String().substring(0, 10)} to ${_toDate.toIso8601String().substring(0, 10)}', subject: 'Attendance Report');
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error sharing report: $e')),
@@ -262,10 +256,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
         reportText.writeln('-' * 30);
       }
 
-      await Share.share(
-        reportText.toString(),
-        subject: 'Attendance Report',
-      );
+      // ignore: deprecated_member_use
+      await Share.share(reportText.toString(), subject: 'Attendance Report');
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error sharing report: $e')),
@@ -286,60 +278,56 @@ class _ReportsScreenState extends State<ReportsScreen> {
           tooltip: 'Back to Home',
         ),
         actions: [
-          PopupMenuButton<String>(
+          IconButton(
             icon: const Icon(Icons.share),
             tooltip: 'Share Report',
-            onSelected: (value) {
-              if (value == 'absentee') {
+            onPressed: () async {
+              final choice = await showDialog<String>(
+                context: context,
+                builder: (ctx) => SimpleDialog(
+                  title: const Text('Share Report'),
+                  children: [
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, 'daily_options'),
+                      child: Row(children: const [Icon(Icons.today), SizedBox(width: 8), Text('Daily Report Options')]),
+                    ),
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, 'absentee'),
+                      child: Row(children: const [Icon(Icons.report_problem), SizedBox(width: 8), Text('Daily Absentee Report')]),
+                    ),
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, 'csv'),
+                      child: Row(children: const [Icon(Icons.grid_on), SizedBox(width: 8), Text('CSV Report')]),
+                    ),
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, 'text'),
+                      child: Row(children: const [Icon(Icons.text_snippet), SizedBox(width: 8), Text('Plain Text Report')]),
+                    ),
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, null),
+                      child: const Text('Cancel'),
+                    ),
+                  ],
+                ),
+              );
+
+              if (choice == 'absentee') {
                 _shareFormattedAbsenteeReport();
-              } else if (value == 'csv') {
+              } else if (choice == 'csv') {
                 _shareReport();
-              } else if (value == 'text') {
+              } else if (choice == 'text') {
                 _shareTextReport();
-              } else if (value == 'daily_options') {
+              } else if (choice == 'daily_options') {
                 _showDailyReportOptions();
               }
             },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'daily_options',
-                child: ListTile(
-                  leading: Icon(Icons.today),
-                  title: Text('Daily Report Options'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'absentee',
-                child: ListTile(
-                  leading: Icon(Icons.report_problem),
-                  title: Text('Daily Absentee Report'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'csv',
-                child: ListTile(
-                  leading: Icon(Icons.table_chart),
-                  title: Text('Share as CSV'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'text',
-                child: ListTile(
-                  leading: Icon(Icons.text_fields),
-                  title: Text('Share as Text'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-            ],
           ),
         ],
       ),
       body: Consumer3<ReportProvider, StudentProvider, AttendanceProvider>(
         builder: (context, reportProvider, studentProvider, attendanceProvider, child) {
-          return Column(
+          return ListView(
+            padding: const EdgeInsets.only(bottom: 80),
             children: [
               // Class Selection for Daily Reports
               Padding(
@@ -449,8 +437,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
                               child: ElevatedButton(
                                 onPressed: _showDailyReportOptions,
                                 style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.blue,
-                                  foregroundColor: Colors.white,
+                                  backgroundColor: Theme.of(context).colorScheme.primary,
+                                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
                                   padding: const EdgeInsets.symmetric(vertical: 12),
                                   alignment: Alignment.center,
                                 ),
@@ -477,8 +465,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
                               child: ElevatedButton(
                                 onPressed: _shareFormattedAbsenteeReport,
                                 style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.orange,
-                                  foregroundColor: Colors.white,
+                                  backgroundColor: Theme.of(context).colorScheme.tertiaryContainer,
+                                  foregroundColor: Theme.of(context).colorScheme.onTertiaryContainer,
                                   padding: const EdgeInsets.symmetric(vertical: 12),
                                   alignment: Alignment.center,
                                 ),
@@ -607,80 +595,85 @@ class _ReportsScreenState extends State<ReportsScreen> {
 
               const SizedBox(height: 16),
 
-              // Report Content
-              Expanded(
-                child: studentProvider.students.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'No students found. Please add students first.',
-                          style: TextStyle(fontSize: 16),
-                        ),
-                      )
-                    : ListView.builder(
-                        itemCount: studentProvider.students.length,
-                        itemBuilder: (context, index) {
-                          final student = studentProvider.students[index];
-                          final attendanceData = reportProvider.getStudentAttendanceData(student.id);
+              // Report Content (student list)
+              if (studentProvider.students.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 24.0),
+                  child: Center(
+                    child: Text(
+                      'No students found. Please add students first.',
+                      style: TextStyle(fontSize: 16, color: Theme.of(context).colorScheme.onSurface),
+                    ),
+                  ),
+                )
+              else
+                ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: studentProvider.students.length,
+                  itemBuilder: (context, index) {
+                    final student = studentProvider.students[index];
+                    final attendanceData = reportProvider.getStudentAttendanceData(student.id);
 
-                          return Card(
-                            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                            child: ListTile(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                              leading: CircleAvatar(
-                                radius: 20,
-                                backgroundColor: attendanceData['percentage'] >= 75
-                                    ? Colors.green
-                                    : attendanceData['percentage'] >= 50
-                                        ? Colors.orange
-                                        : Colors.red,
-                                child: Text(
-                                  '${attendanceData['percentage'].toInt()}%',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 10,
-                                  ),
-                                ),
-                              ),
-                              title: Text(
-                                student.name,
-                                overflow: TextOverflow.ellipsis,
-                                maxLines: 1,
-                                style: const TextStyle(fontSize: 14),
-                              ),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    'Roll No: ${student.rollNumber}',
-                                    overflow: TextOverflow.ellipsis,
-                                    maxLines: 1,
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                  Text(
-                                    'Sem ${student.semester} • ${student.department} • Div ${student.division}',
-                                    overflow: TextOverflow.ellipsis,
-                                    maxLines: 1,
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                  Text(
-                                    'Present: ${attendanceData['present']}/${attendanceData['total']}',
-                                    overflow: TextOverflow.ellipsis,
-                                    maxLines: 1,
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                ],
-                              ),
-                              trailing: SizedBox(
-                                width: 32,
-                                height: 32,
-                                child: IconButton(
-                                  padding: EdgeInsets.zero,
-                                  iconSize: 18,
-                                  icon: const Icon(Icons.share),
-                                  onPressed: () async {
-                                    final text = '''
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        leading: CircleAvatar(
+                          radius: 20,
+                          backgroundColor: attendanceData['percentage'] >= 75
+                              ? Theme.of(context).colorScheme.primary
+                              : attendanceData['percentage'] >= 50
+                                  ? Theme.of(context).colorScheme.tertiary
+                                  : Theme.of(context).colorScheme.error,
+                          child: Text(
+                            '${attendanceData['percentage'].toInt()}%',
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.onPrimary,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          student.name,
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Roll No: ${student.rollNumber}',
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            Text(
+                              'Sem ${student.semester} • ${student.department} • Div ${student.division}',
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            Text(
+                              'Present: ${attendanceData['present']}/${attendanceData['total']}',
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ],
+                        ),
+                        trailing: SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            iconSize: 18,
+                            icon: const Icon(Icons.share),
+                            onPressed: () async {
+                              final text = '''
 Student: ${student.name}
 Roll No: ${student.rollNumber}
 Semester: ${student.semester}
@@ -690,16 +683,16 @@ Total Classes: ${attendanceData['total']}
 Present: ${attendanceData['present']}
 Absent: ${attendanceData['absent']}
 Attendance Percentage: ${attendanceData['percentage'].toStringAsFixed(1)}%
-                                    ''';
-                                    await Share.share(text);
-                                  },
-                                ),
-                              ),
-                            ),
-                          );
-                        },
+                              ''';
+                              // ignore: deprecated_member_use
+                              await Share.share(text);
+                            },
+                          ),
+                        ),
                       ),
-              ),
+                    );
+                  },
+                ),
             ],
           );
         },

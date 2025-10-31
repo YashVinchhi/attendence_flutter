@@ -51,8 +51,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Future<void> _loadStudentsAndAttendance() async {
     setState(() => _isLoading = true);
-    final studentProvider = Provider.of<StudentProvider>(context, listen: false);
-    final attendanceProvider = Provider.of<AttendanceProvider>(context, listen: false);
+    final studentProvider = Provider.of<StudentProvider>(
+        context, listen: false);
+    final attendanceProvider = Provider.of<AttendanceProvider>(
+        context, listen: false);
 
     if (studentProvider.students.isEmpty) {
       await studentProvider.fetchStudents();
@@ -70,15 +72,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   String? _getLectureString() {
     if (_selectedSubject != null && _selectedLectureNumber != null) {
-      // include selected time slot in lecture string when available
-      final slot = _selectedTimeSlot != null ? ' • $_selectedTimeSlot' : '';
-      return '$_selectedSubject - Lecture $_selectedLectureNumber$slot';
+      // Return canonical lecture string used in DB: 'SUBJECT - Lecture N'.
+      // Do not append time slot here — time slot is stored/handled separately
+      // (or normalized by DB) to avoid mismatches when querying attendance.
+      return '$_selectedSubject - Lecture $_selectedLectureNumber';
     }
     return null;
   }
 
   void _filterStudents() {
-    final studentProvider = Provider.of<StudentProvider>(context, listen: false);
+    final studentProvider = Provider.of<StudentProvider>(
+        context, listen: false);
     List<Student> list = studentProvider.getStudentsByClass(
       _selectedSemester,
       _selectedDepartment,
@@ -88,7 +92,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     // Search by name or roll
     if (_searchQuery.isNotEmpty) {
       final q = _searchQuery.toLowerCase();
-      list = list.where((s) => s.name.toLowerCase().contains(q) || s.rollNumber.toLowerCase().contains(q)).toList();
+      list = list.where((s) =>
+      s.name.toLowerCase().contains(q) ||
+          s.rollNumber.toLowerCase().contains(q)).toList();
     }
 
     // Apply status filter if we already have attendanceStatus
@@ -140,21 +146,24 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _filteredStudents = list;
       // Reset attendance status map keys if it was empty
       if (_attendanceStatus.isEmpty) {
-        _attendanceStatus = { for (var s in _filteredStudents) s.id!: true };
+        _attendanceStatus = { for (var s in _filteredStudents) s.id!: true};
       }
     });
   }
 
   void _loadAttendanceStatus() {
-    final attendanceProvider = Provider.of<AttendanceProvider>(context, listen: false);
+    final attendanceProvider = Provider.of<AttendanceProvider>(
+        context, listen: false);
     setState(() {
       _attendanceStatus.clear();
       for (var student in _filteredStudents) {
-        bool isPresent = attendanceProvider.isStudentPresent(
-          student.id!,
-          _selectedDate.toIso8601String().substring(0, 10),
-          lecture: _getLectureString(),
-        );
+        final dateStr = _selectedDate.toIso8601String().substring(0, 10);
+        // If there is an explicit attendance record for this student/date/lecture, respect it.
+        // Otherwise default to PRESENT as requested.
+        final hasRec = attendanceProvider.hasAttendanceRecord(
+            student.id!, dateStr, lecture: _getLectureString(), timeSlot: _selectedTimeSlot);
+        final isPresent = hasRec ? attendanceProvider.isStudentPresent(
+            student.id!, dateStr, lecture: _getLectureString(), timeSlot: _selectedTimeSlot) : true;
         _attendanceStatus[student.id!] = isPresent;
       }
     });
@@ -174,7 +183,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('All students marked present')),
+        SnackBar(content: Text('All students marked present'), backgroundColor: Theme.of(context).colorScheme.primary),
       );
     }
   }
@@ -187,7 +196,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('All students marked absent')),
+        SnackBar(content: Text('All students marked absent'), backgroundColor: Theme.of(context).colorScheme.error),
       );
     }
   }
@@ -209,50 +218,73 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Future<void> _saveAttendance() async {
     try {
-      final attendanceProvider = Provider.of<AttendanceProvider>(context, listen: false);
+      final attendanceProvider = Provider.of<AttendanceProvider>(
+          context, listen: false);
 
       if (_selectedSubject == null || _selectedLectureNumber == null) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please select subject and lecture number before saving'),
-            backgroundColor: Colors.orange,
+          SnackBar(
+            content: Text(
+                'Please select subject and lecture number before saving'),
+            backgroundColor: Theme.of(context).colorScheme.tertiary,
           ),
         );
         return;
       }
 
-      List<Future> saveTasks = [];
       final lectureString = _getLectureString();
       final dateString = _selectedDate.toIso8601String().substring(0, 10);
 
+      // Collect save futures and results so we can report failures
+      final List<Future<bool>> tasks = [];
+
       for (var student in _filteredStudents) {
         final isPresent = _attendanceStatus[student.id] ?? true;
-        saveTasks.add(
+        tasks.add(
             attendanceProvider.markAttendance(
               student.id!,
               dateString,
               isPresent,
               lecture: lectureString,
+              timeSlot: _selectedTimeSlot,
             )
         );
       }
 
-      await Future.wait(saveTasks);
+      final results = await Future.wait(tasks);
+      final failedCount = results.where((r) => r == false).length;
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Attendance saved successfully for ${_filteredStudents.length} students'),
-            backgroundColor: Colors.green,
-          ),
-        );
+      // Refresh provider's internal cache to ensure other screens see updated data
+      await attendanceProvider.fetchAttendanceByDateAndLecture(dateString, lectureString, timeSlot: _selectedTimeSlot);
+
+      // Recompute local attendanceStatus based on refreshed provider data
+      _loadAttendanceStatus();
+
+      if (failedCount > 0) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Saved with $failedCount failures. Some records could not be updated.'),
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Attendance saved successfully for ${_filteredStudents.length} students'),
+              backgroundColor: Theme.of(context).colorScheme.primary,
+            ),
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error saving attendance: $e'),
-            backgroundColor: Colors.red,
+            backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
       }
@@ -260,41 +292,53 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Widget _buildSkeletonList() {
+    final scheme = Theme.of(context).colorScheme;
+    final baseGrey = scheme.surfaceContainerHighest;
+    final lightGrey = scheme.surface;
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
-        children: List.generate(8, (index) => Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          child: Padding(
-            padding: const EdgeInsets.all(12.0),
-            child: Row(
-              children: [
-                Container(width: 64, height: 40, decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(6))),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(height: 14, width: 160, color: Colors.grey.shade300),
-                      const SizedBox(height: 8),
-                      Container(height: 12, width: 220, color: Colors.grey.shade200),
-                    ],
-                  ),
+        children: List.generate(8, (index) =>
+            Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Row(
+                  children: [
+                    Container(width: 64,
+                        height: 40,
+                        decoration: BoxDecoration(color: baseGrey,
+                            borderRadius: BorderRadius.circular(6))),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(height: 14, width: 160, color: baseGrey),
+                          const SizedBox(height: 8),
+                          Container(height: 12, width: 220, color: lightGrey),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Container(
+                        width: 24, height: 24, color: baseGrey),
+                    const SizedBox(width: 8),
+                    Container(
+                        width: 24, height: 24, color: baseGrey),
+                  ],
                 ),
-                const SizedBox(width: 12),
-                Container(width: 24, height: 24, color: Colors.grey.shade300),
-                const SizedBox(width: 8),
-                Container(width: 24, height: 24, color: Colors.grey.shade300),
-              ],
-            ),
-          ),
-        )),
-      ),
-    );
+              ),
+            )),
+      ));
   }
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final onSurface = scheme.onSurface;
+    final mutedText = onSurface.withAlpha((0.8 * 255).round());
     return Scaffold(
       appBar: AppBar(
         title: const Text('Take Attendance', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -320,30 +364,31 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           // Quick mark all action
           showModalBottomSheet(
             context: context,
-            builder: (context) => Container(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ListTile(
-                    leading: const Icon(Icons.check_circle, color: Colors.green),
-                    title: const Text('Mark All Present'),
-                    onTap: () {
-                      Navigator.pop(context);
-                      _markAllPresent();
-                    },
+            builder: (context) =>
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ListTile(
+                        leading: Icon(Icons.check_circle, color: Theme.of(context).colorScheme.primary),
+                        title: const Text('Mark All Present'),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _markAllPresent();
+                        },
+                      ),
+                      ListTile(
+                        leading: Icon(Icons.cancel, color: Theme.of(context).colorScheme.error),
+                        title: const Text('Mark All Absent'),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _markAllAbsent();
+                        },
+                      ),
+                    ],
                   ),
-                  ListTile(
-                    leading: const Icon(Icons.cancel, color: Colors.red),
-                    title: const Text('Mark All Absent'),
-                    onTap: () {
-                      Navigator.pop(context);
-                      _markAllAbsent();
-                    },
-                  ),
-                ],
-              ),
-            ),
+                ),
           );
         },
         child: const Icon(Icons.add),
@@ -359,13 +404,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               elevation: 0,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
-                side: BorderSide(color: Colors.grey.shade300),
+                side: BorderSide(color: scheme.outline),
               ),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Row(
                   children: [
-                    Icon(Icons.calendar_today, size: 20, color: Colors.grey.shade600),
+                    Icon(Icons.calendar_today, size: 20, color: mutedText),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
@@ -375,7 +420,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                             'Date',
                             style: TextStyle(
                               fontSize: 12,
-                              color: Colors.grey.shade600,
+                              color: mutedText,
                             ),
                           ),
                           const SizedBox(height: 4),
@@ -450,8 +495,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: _buildFilterChip(
-                    label: _selectedLectureNumber != null ? 'Lec $_selectedLectureNumber' : 'Lec',
-                    onTap: _selectedSubject != null ? () => _showLecturePicker() : null,
+                    label: _selectedLectureNumber != null
+                        ? 'Lec $_selectedLectureNumber'
+                        : 'Lec',
+                    onTap: _selectedSubject != null
+                        ? () => _showLecturePicker()
+                        : null,
                   ),
                 ),
               ],
@@ -478,14 +527,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 prefixIcon: const Icon(Icons.search),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Colors.grey.shade300),
+                  borderSide: BorderSide(color: scheme.outline),
                 ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Colors.grey.shade300),
+                  borderSide: BorderSide(color: scheme.outline),
                 ),
                 filled: true,
-                fillColor: Colors.grey.shade50,
+                fillColor: scheme.surfaceContainerHighest,
               ),
               onChanged: (v) {
                 setState(() => _searchQuery = v.trim());
@@ -499,13 +548,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  _buildStatusChip('All', 'all', Colors.grey),
+                  _buildStatusChip('All', 'all', Theme.of(context).colorScheme.surfaceContainerHighest),
                   const SizedBox(width: 8),
-                  _buildStatusChip('Present', 'present', Colors.green),
+                  _buildStatusChip('Present', 'present', Theme.of(context).colorScheme.primary),
                   const SizedBox(width: 8),
-                  _buildStatusChip('Absent', 'absent', Colors.red),
+                  _buildStatusChip('Absent', 'absent', Theme.of(context).colorScheme.error),
                   const SizedBox(width: 8),
-                  _buildStatusChip('Late', 'late', Colors.orange),
+                  _buildStatusChip('Late', 'late', Theme.of(context).colorScheme.tertiary),
                 ],
               ),
             ),
@@ -564,7 +613,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 color: Colors.transparent,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(color: Colors.grey.shade200),
+                  side: BorderSide(color: scheme.outline),
                 ),
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -574,21 +623,27 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       _buildSummaryItem(
                         'Total',
                         '${_filteredStudents.length}',
-                        Colors.blue,
+                        Theme.of(context).colorScheme.secondary,
                         Icons.people,
                       ),
-                      Container(width: 1, height: 40, color: Colors.grey.shade300),
+                      Container(
+                          width: 1, height: 40, color: scheme.outline),
                       _buildSummaryItem(
                         'Present',
-                        '${_attendanceStatus.values.where((s) => s).length}',
-                        Colors.green,
+                        '${_attendanceStatus.values
+                            .where((s) => s)
+                            .length}',
+                        Theme.of(context).colorScheme.primary,
                         Icons.check_circle,
                       ),
-                      Container(width: 1, height: 40, color: Colors.grey.shade300),
+                      Container(
+                          width: 1, height: 40, color: scheme.outline),
                       _buildSummaryItem(
                         'Absent',
-                        '${_attendanceStatus.values.where((s) => !s).length}',
-                        Colors.red,
+                        '${_attendanceStatus.values
+                            .where((s) => !s)
+                            .length}',
+                        Theme.of(context).colorScheme.error,
                         Icons.cancel,
                       ),
                     ],
@@ -608,7 +663,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
-                        color: Colors.grey.shade700,
+                        color: onSurface,
                       ),
                     ),
                     const Spacer(),
@@ -616,7 +671,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       '${_filteredStudents.length} students',
                       style: TextStyle(
                         fontSize: 14,
-                        color: Colors.grey.shade600,
+                        color: mutedText,
                       ),
                     ),
                   ],
@@ -626,51 +681,53 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             // Student List or States
             if (_isLoading)
               _buildSkeletonList()
-            else if (_filteredStudents.isEmpty)
-              Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(40.0),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.people_outline,
-                        size: 80,
-                        color: Colors.grey.shade300,
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'No Students Found',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.grey.shade700,
+            else
+              if (_filteredStudents.isEmpty)
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(40.0),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.people_outline,
+                          size: 80,
+                          color: scheme.outline,
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Try adjusting your filters or import students',
-                        style: TextStyle(
-                          color: Colors.grey.shade500,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 24),
-                      ElevatedButton.icon(
-                        onPressed: () => context.go('/students'),
-                        icon: const Icon(Icons.upload_file),
-                        label: const Text('Import Students'),
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+                        const SizedBox(height: 16),
+                        Text(
+                          'No Students Found',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: onSurface,
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 8),
+                        Text(
+                          'Try adjusting your filters or import students',
+                          style: TextStyle(
+                            color: mutedText,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton.icon(
+                          onPressed: () => context.go('/students'),
+                          icon: const Icon(Icons.upload_file),
+                          label: const Text('Import Students'),
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 24,
+                                vertical: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
             // Student cards
             ..._filteredStudents.map((student) {
               final isPresent = _attendanceStatus[student.id] ?? true;
@@ -679,7 +736,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 margin: const EdgeInsets.only(bottom: 12),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(color: Colors.grey.shade200),
+                  side: BorderSide(color: scheme.outline),
                 ),
                 child: InkWell(
                   borderRadius: BorderRadius.circular(12),
@@ -692,16 +749,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                         CircleAvatar(
                           radius: 24,
                           backgroundColor: isPresent
-                              ? Colors.green.shade50
-                              : Colors.red.shade50,
+                              ? Theme.of(context).colorScheme.primary.withAlpha(0x12)
+                              : Theme.of(context).colorScheme.error.withAlpha(0x12),
                           child: Text(
                             student.name.isNotEmpty
                                 ? student.name[0].toUpperCase()
                                 : 'S',
                             style: TextStyle(
                               color: isPresent
-                                  ? Colors.green.shade800
-                                  : Colors.red.shade800,
+                                  ? Theme.of(context).colorScheme.primary
+                                  : Theme.of(context).colorScheme.error,
                               fontWeight: FontWeight.bold,
                               fontSize: 18,
                             ),
@@ -727,7 +784,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                                 'Roll: ${student.rollNumber}',
                                 style: TextStyle(
                                   fontSize: 13,
-                                  color: Colors.grey.shade600,
+                                  color: mutedText,
                                 ),
                               ),
                             ],
@@ -738,9 +795,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            _buildCircleToggle(isPresent, true, onTap: () => _markAttendance(student.id!, true)),
+                            _buildCircleToggle(isPresent, true, onTap: () =>
+                                _markAttendance(student.id!, true)),
                             const SizedBox(width: 8),
-                            _buildCircleToggle(!isPresent, false, onTap: () => _markAttendance(student.id!, false)),
+                            _buildCircleToggle(!isPresent, false, onTap: () =>
+                                _markAttendance(student.id!, false)),
                           ],
                         ),
                       ],
@@ -754,12 +813,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24.0),
               child: ElevatedButton(
-                onPressed: _filteredStudents.isNotEmpty ? _saveAttendance : null,
+                onPressed: _filteredStudents.isNotEmpty
+                    ? _saveAttendance
+                    : null,
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 18),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
                 ),
-                child: const Text('Submit Attendance', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                child: const Text('Submit Attendance', style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold)),
               ),
             ),
 
@@ -771,15 +834,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Widget _buildFilterChip({required String label, VoidCallback? onTap}) {
+    final scheme = Theme.of(context).colorScheme;
+    final mutedText = scheme.onSurface.withAlpha((0.8 * 255).round());
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
         decoration: BoxDecoration(
-          color: Colors.grey.shade100,
+          color: scheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.grey.shade300),
+          border: Border.all(color: scheme.outline),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -787,9 +852,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             Expanded(
               child: Text(
                 label,
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w500,
                   fontSize: 14,
+                  color: scheme.onSurface,
                 ),
                 textAlign: TextAlign.center,
                 maxLines: 1,
@@ -798,7 +864,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             ),
             if (onTap != null) ...[
               const SizedBox(width: 4),
-              Icon(Icons.arrow_drop_down, size: 20, color: Colors.grey.shade600),
+              Icon(Icons.arrow_drop_down, size: 20, color: mutedText),
             ],
           ],
         ),
@@ -807,6 +873,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Widget _buildStatusChip(String label, String value, Color color) {
+    final scheme = Theme.of(context).colorScheme;
+    final mutedText = scheme.onSurface.withAlpha((0.8 * 255).round());
     final isSelected = _statusFilter == value;
     return FilterChip(
       label: Text(label),
@@ -815,20 +883,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         setState(() => _statusFilter = value);
         _filterStudents();
       },
-      backgroundColor: Colors.grey.shade100,
-      selectedColor: color.withOpacity(0.2),
+      backgroundColor: scheme.surfaceContainerHighest,
+      selectedColor: color.withAlpha((0.2 * 255).round()),
       checkmarkColor: color,
       labelStyle: TextStyle(
-        color: isSelected ? color : Colors.grey.shade700,
+        color: isSelected ? color : mutedText,
         fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
       ),
       side: BorderSide(
-        color: isSelected ? color : Colors.grey.shade300,
+        color: isSelected ? color : scheme.outline,
       ),
     );
   }
 
-  Widget _buildSummaryItem(String label, String count, Color color, IconData icon) {
+  Widget _buildSummaryItem(String label, String count, Color color,
+      IconData icon) {
+    final scheme = Theme.of(context).colorScheme;
+    final muted = scheme.onSurface.withAlpha((0.8 * 255).round());
     return Column(
       children: [
         Icon(icon, color: color, size: 24),
@@ -845,14 +916,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           label,
           style: TextStyle(
             fontSize: 12,
-            color: Colors.grey.shade600,
+            color: muted,
           ),
         ),
       ],
     );
   }
 
-  Widget _buildCircleToggle(bool active, bool positive, {required VoidCallback onTap}) {
+  Widget _buildCircleToggle(bool active, bool positive,
+      {required VoidCallback onTap}) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(28),
@@ -860,14 +932,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         width: 44,
         height: 44,
         decoration: BoxDecoration(
-          color: active ? (positive ? Colors.green.shade50 : Colors.red.shade50) : Colors.grey.shade100,
+          color: active ? (positive ? Theme.of(context).colorScheme.primary.withAlpha(0x12) : Theme.of(context).colorScheme.error.withAlpha(0x12)) : Theme.of(context).colorScheme.surfaceContainerHighest,
           shape: BoxShape.circle,
-          border: Border.all(color: active ? (positive ? Colors.green : Colors.red) : Colors.grey.shade300, width: active ? 2 : 1),
+          border: Border.all(color: active ? (positive ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.error) : Theme.of(context).colorScheme.outline, width: active ? 2 : 1),
         ),
         child: Center(
           child: Icon(
             positive ? Icons.check : Icons.close,
-            color: active ? (positive ? Colors.green.shade800 : Colors.red.shade800) : Colors.grey.shade600,
+            color: active ? (positive ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.error) : Theme.of(context).colorScheme.onSurface.withAlpha((0.8 * 255).round()),
             size: 20,
           ),
         ),
@@ -879,154 +951,155 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   void _showSemesterPicker() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: DatabaseHelper.instance.getSemesters().map((sem) {
-            return ListTile(
-              title: Text('Semester $sem'),
-              trailing: _selectedSemester == sem ? const Icon(Icons.check) : null,
-              onTap: () {
-                setState(() => _selectedSemester = sem);
-                _loadStudentsAndAttendance();
-                Navigator.pop(context);
-              },
-            );
-          }).toList(),
-        ),
-      ),
+      builder: (context) =>
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: DatabaseHelper.instance.getSemesters().map((sem) {
+                return ListTile(
+                  title: Text('Semester $sem'),
+                  trailing: _selectedSemester == sem
+                      ? const Icon(Icons.check)
+                      : null,
+                  onTap: () {
+                    setState(() => _selectedSemester = sem);
+                    _loadStudentsAndAttendance();
+                    Navigator.pop(context);
+                  },
+                );
+              }).toList(),
+            ),
+          ),
     );
   }
 
   void _showDepartmentPicker() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: DatabaseHelper.instance.getDepartments().map((dept) {
-            return ListTile(
-              title: Text(dept),
-              trailing: _selectedDepartment == dept ? const Icon(Icons.check) : null,
-              onTap: () {
-                setState(() => _selectedDepartment = dept);
-                _loadStudentsAndAttendance();
-                Navigator.pop(context);
-              },
-            );
-          }).toList(),
-        ),
-      ),
+      builder: (context) =>
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: DatabaseHelper.instance.getDepartments().map((dept) {
+                return ListTile(
+                  title: Text(dept),
+                  trailing: _selectedDepartment == dept ? const Icon(
+                      Icons.check) : null,
+                  onTap: () {
+                    setState(() => _selectedDepartment = dept);
+                    _loadStudentsAndAttendance();
+                    Navigator.pop(context);
+                  },
+                );
+              }).toList(),
+            ),
+          ),
     );
   }
 
   void _showDivisionPicker() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: DatabaseHelper.instance.getDivisions().map((div) {
-            return ListTile(
-              title: Text('Division $div'),
-              trailing: _selectedDivision == div ? const Icon(Icons.check) : null,
-              onTap: () {
-                setState(() => _selectedDivision = div);
-                _loadStudentsAndAttendance();
-                Navigator.pop(context);
-              },
-            );
-          }).toList(),
-        ),
-      ),
+      builder: (context) =>
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: DatabaseHelper.instance.getDivisions().map((div) {
+                return ListTile(
+                  title: Text('Division $div'),
+                  trailing: _selectedDivision == div
+                      ? const Icon(Icons.check)
+                      : null,
+                  onTap: () {
+                    setState(() => _selectedDivision = div);
+                    _loadStudentsAndAttendance();
+                    Navigator.pop(context);
+                  },
+                );
+              }).toList(),
+            ),
+          ),
     );
   }
 
   void _showSubjectPicker() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: _getSubjects().map((subject) {
-            return ListTile(
-              title: Text(subject),
-              trailing: _selectedSubject == subject ? const Icon(Icons.check) : null,
-              onTap: () {
-                setState(() {
-                  _selectedSubject = subject;
-                  _selectedLectureNumber = null;
-                });
-                _loadStudentsAndAttendance();
-                Navigator.pop(context);
-              },
-            );
-          }).toList(),
-        ),
-      ),
+      builder: (context) =>
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: _getSubjects().map((subject) {
+                return ListTile(
+                  title: Text(subject),
+                  trailing: _selectedSubject == subject ? const Icon(
+                      Icons.check) : null,
+                  onTap: () {
+                    setState(() {
+                      _selectedSubject = subject;
+                      _selectedLectureNumber = null;
+                    });
+                    _loadStudentsAndAttendance();
+                    Navigator.pop(context);
+                  },
+                );
+              }).toList(),
+            ),
+          ),
     );
   }
 
   void _showLecturePicker() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(6, (i) => i + 1).map((num) {
-            return ListTile(
-              title: Text('Lecture $num'),
-              trailing: _selectedLectureNumber == num ? const Icon(Icons.check) : null,
-              onTap: () {
-                setState(() => _selectedLectureNumber = num);
-                _loadStudentsAndAttendance();
-                Navigator.pop(context);
-              },
-            );
-          }).toList(),
-        ),
-      ),
+      builder: (context) =>
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(6, (i) => i + 1).map((num) {
+                return ListTile(
+                  title: Text('Lecture $num'),
+                  trailing: _selectedLectureNumber == num ? const Icon(
+                      Icons.check) : null,
+                  onTap: () {
+                    setState(() => _selectedLectureNumber = num);
+                    _loadStudentsAndAttendance();
+                    Navigator.pop(context);
+                  },
+                );
+              }).toList(),
+            ),
+          ),
     );
   }
 
   void _showTimeSlotPicker() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: _getTimeSlots().map((m) {
-            return ListTile(
-              title: Text(m['label'] ?? m['value']!),
-              trailing: _selectedTimeSlot == m['value'] ? const Icon(Icons.check) : null,
-              onTap: () {
-                setState(() => _selectedTimeSlot = m['value']);
-                _loadStudentsAndAttendance();
-                Navigator.pop(context);
-              },
-            );
-          }).toList(),
-        ),
-      ),
-    );
-  }
-
-  // Helper widget for the summary card
-  Widget _buildSummaryColumn(String title, String count, Color color) {
-    return Column(
-      children: [
-        Text(
-          count,
-          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color),
-        ),
-        Text(title),
-      ],
+      builder: (context) =>
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: _getTimeSlots().map((m) {
+                return ListTile(
+                  title: Text(m['label'] ?? m['value']!),
+                  trailing: _selectedTimeSlot == m['value'] ? const Icon(
+                      Icons.check) : null,
+                  onTap: () {
+                    setState(() => _selectedTimeSlot = m['value']);
+                    _loadStudentsAndAttendance();
+                    Navigator.pop(context);
+                  },
+                );
+              }).toList(),
+            ),
+          ),
     );
   }
 }

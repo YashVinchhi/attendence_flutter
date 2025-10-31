@@ -224,12 +224,24 @@ class ReportProvider with ChangeNotifier {
     try {
       Directory? directory;
 
-      if (Platform.isAndroid) {
-        directory = await getExternalStorageDirectory();
-      } else if (Platform.isIOS) {
-        directory = await getApplicationDocumentsDirectory();
-      } else {
-        directory = await getDownloadsDirectory();
+      // Try sensible directory choices with fallbacks
+      try {
+        if (Platform.isAndroid) {
+          directory = await getExternalStorageDirectory();
+        } else if (Platform.isIOS) {
+          directory = await getApplicationDocumentsDirectory();
+        } else {
+          // On desktop or other platforms prefer downloads, else documents
+          directory = await getDownloadsDirectory();
+          if (directory == null) directory = await getApplicationDocumentsDirectory();
+        }
+      } catch (e) {
+        // Accessing platform dirs can fail; fallback to application documents
+        try {
+          directory = await getApplicationDocumentsDirectory();
+        } catch (_) {
+          directory = null;
+        }
       }
 
       if (directory == null) {
@@ -238,14 +250,40 @@ class ReportProvider with ChangeNotifier {
       }
 
       final file = File('${directory.path}/$fileName');
-      await file.writeAsString(content);
 
-      // Share the file
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        text: 'Attendance Report - $_fromDate to $_toDate',
-        subject: 'Attendance Report',
-      );
+      try {
+        await file.writeAsString(content);
+      } catch (e) {
+        // If writing to external storage fails (permissions), try application documents
+        try {
+          final altDir = await getApplicationDocumentsDirectory();
+          final altFile = File('${altDir.path}/$fileName');
+          await altFile.writeAsString(content);
+          // Replace file reference with altFile for sharing below
+          // ignore: prefer_final_locals
+          directory = altDir;
+        } catch (writeErr) {
+          _setState(ReportProviderState.error, error: 'Failed to save file: ${writeErr.toString()}');
+          return false;
+        }
+      }
+
+      // Attempt to share the file. If file sharing fails, fallback to sharing raw text.
+      try {
+        await Share.shareXFiles(
+          [XFile(file.path)],
+          text: 'Attendance Report - $_fromDate to $_toDate',
+          subject: 'Attendance Report',
+        );
+      } catch (shareErr) {
+        // Fallback: share as plain text (CSV content) if file share isn't supported
+        try {
+          await Share.share(content, subject: 'Attendance Report - $_fromDate to $_toDate');
+        } catch (textShareErr) {
+          _setState(ReportProviderState.error, error: 'Failed to share file: ${textShareErr.toString()}');
+          return false;
+        }
+      }
 
       return true;
     } catch (e) {
@@ -304,7 +342,11 @@ class ReportProvider with ChangeNotifier {
       report.writeln('-' * 50);
       report.writeln('Total Students: ${students.length}');
       report.writeln('Total Classes Conducted: ${totalClasses ~/ students.length}');
-      report.writeln('Average Attendance: ${students.isNotEmpty ? (totalPresent / (totalPresent + totalAbsent) * 100).toStringAsFixed(1) : 0}%');
+      final totalAttendanceCount = totalPresent + totalAbsent;
+      final avgAttendance = (students.isNotEmpty && totalAttendanceCount > 0)
+          ? (totalPresent / totalAttendanceCount * 100)
+          : 0.0;
+      report.writeln('Average Attendance: ${avgAttendance.toStringAsFixed(1)}%');
 
       return report.toString();
     } catch (e) {
@@ -337,13 +379,13 @@ class ReportProvider with ChangeNotifier {
       ''', [_fromDate, _toDate]);
 
       return result.map((row) {
-        final total = row['total_records'] as int;
-        final present = row['present_count'] as int;
+        final total = (row['total_records'] is int) ? row['total_records'] as int : int.tryParse('${row['total_records']}') ?? 0;
+        final present = (row['present_count'] is int) ? row['present_count'] as int : int.tryParse('${row['present_count']}') ?? 0;
+        final absent = (row['absent_count'] is int) ? row['absent_count'] as int : int.tryParse('${row['absent_count']}') ?? 0;
         return {
           'date': row['date'],
           'total': total,
           'present': present,
-          'absent': row['absent_count'],
           'percentage': total > 0 ? (present / total * 100) : 0.0,
         };
       }).toList();

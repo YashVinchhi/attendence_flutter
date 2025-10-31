@@ -61,13 +61,13 @@ class AttendanceProvider with ChangeNotifier {
     }
   }
 
-  Future<void> fetchAttendanceByDateAndLecture(String date, String? lecture) async {
+  Future<void> fetchAttendanceByDateAndLecture(String date, String? lecture, {String? timeSlot}) async {
     if (_state == AttendanceProviderState.loading) return;
     try { DateTime.parse(date); } catch (_) { _setState(AttendanceProviderState.error, error: 'Invalid date format'); return; }
 
     _setState(AttendanceProviderState.loading);
     try {
-      _attendanceRecords = await DatabaseHelper.instance.getAttendanceByDateAndLecture(date, lecture);
+      _attendanceRecords = await DatabaseHelper.instance.getAttendanceByDateAndLecture(date, lecture, timeSlot: timeSlot);
       _setState(AttendanceProviderState.idle);
     } catch (e) {
       if (kDebugMode) print('Error fetching attendance: $e');
@@ -75,7 +75,7 @@ class AttendanceProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> markAttendance(int studentId, String date, bool isPresent, {String? notes, String? lecture}) async {
+  Future<bool> markAttendance(int studentId, String date, bool isPresent, {String? notes, String? lecture, String? timeSlot}) async {
     try {
       final parsedDate = DateTime.parse(date);
       final formattedDate = _formatDate(parsedDate);
@@ -84,13 +84,14 @@ class AttendanceProvider with ChangeNotifier {
         return false;
       }
 
-      final existing = await DatabaseHelper.instance.getAttendanceRecordWithLecture(studentId, formattedDate, lecture);
+      final existing = await DatabaseHelper.instance.getAttendanceRecordWithLecture(studentId, formattedDate, lecture, timeSlot: timeSlot);
 
       if (existing != null) {
         final updated = existing.copyWith(
           isPresent: isPresent,
           notes: notes ?? existing.notes,
           lecture: lecture ?? existing.lecture,
+          timeSlot: timeSlot ?? existing.timeSlot,
           date: parsedDate,
         );
         await DatabaseHelper.instance.updateAttendance(updated);
@@ -106,6 +107,7 @@ class AttendanceProvider with ChangeNotifier {
           isPresent: isPresent,
           notes: notes,
           lecture: lecture,
+          timeSlot: timeSlot,
         );
         final id = await DatabaseHelper.instance.insertAttendance(newRecord);
         _attendanceRecords.add(newRecord.copyWith(id: id));
@@ -120,9 +122,14 @@ class AttendanceProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> _bulkMarkAttendance(List<int> studentIds, String date, bool isPresent, {String? lecture}) async {
+  Future<bool> _bulkMarkAttendance(List<int> studentIds, String date, bool isPresent, {String? lecture, String? timeSlot}) async {
     try {
-      await Future.wait(studentIds.map((id) => markAttendance(id, date, isPresent, lecture: lecture)));
+      final results = await Future.wait(studentIds.map((id) => markAttendance(id, date, isPresent, lecture: lecture, timeSlot: timeSlot)));
+      // If any individual mark failed (returned false), treat bulk as failed
+      if (results.any((r) => r == false)) {
+        _setState(AttendanceProviderState.error, error: 'One or more attendance updates failed');
+        return false;
+      }
       return true;
     } catch (e) {
       if (kDebugMode) print('Bulk mark error: $e');
@@ -131,15 +138,30 @@ class AttendanceProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> markAllPresent(List<int> studentIds, String date, {String? lecture}) => _bulkMarkAttendance(studentIds, date, true, lecture: lecture);
-  Future<bool> markAllAbsent(List<int> studentIds, String date, {String? lecture}) => _bulkMarkAttendance(studentIds, date, false, lecture: lecture);
+  Future<bool> markAllPresent(List<int> studentIds, String date, {String? lecture, String? timeSlot}) => _bulkMarkAttendance(studentIds, date, true, lecture: lecture, timeSlot: timeSlot);
+  Future<bool> markAllAbsent(List<int> studentIds, String date, {String? lecture, String? timeSlot}) => _bulkMarkAttendance(studentIds, date, false, lecture: lecture, timeSlot: timeSlot);
 
-  bool isStudentPresent(int studentId, String date, {String? lecture}) {
-    final record = _attendanceRecords.firstWhere(
-      (r) => r.studentId == studentId && _formatDate(r.date) == date && (lecture == null || r.lecture == lecture),
-      orElse: () => AttendanceRecord(studentId: studentId, date: DateTime.parse(date), isPresent: true, lecture: lecture),
-    );
-    return record.isPresent;
+  bool isStudentPresent(int studentId, String date, {String? lecture, String? timeSlot}) {
+    try {
+      final record = _attendanceRecords.firstWhere(
+        (r) => r.studentId == studentId
+            && _formatDate(r.date) == date
+            && (lecture == null || (r.lecture ?? '') == lecture)
+            && (timeSlot == null || (r.timeSlot ?? '') == timeSlot),
+      );
+      return record.isPresent;
+    } catch (_) {
+      // No record found => treat as absent by default
+      return false;
+    }
+  }
+
+  // Helper: whether we have any attendance record for student+date+lecture
+  bool hasAttendanceRecord(int studentId, String date, {String? lecture, String? timeSlot}) {
+    return _attendanceRecords.any((r) => r.studentId == studentId
+        && _formatDate(r.date) == date
+        && (lecture == null || (r.lecture ?? '') == lecture)
+        && (timeSlot == null || (r.timeSlot ?? '') == timeSlot));
   }
 
   Future<String> generateFormattedAbsenteeReport(String date, int semester, String department, String division) async {

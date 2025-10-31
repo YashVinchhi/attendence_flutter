@@ -1,5 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:provider/provider.dart';
+import '../providers/user_provider.dart';
+
+// Small private model for nav items
+class _NavItem {
+  final IconData icon;
+  final IconData selectedIcon;
+  final String label;
+  final String route;
+  const _NavItem({required this.icon, required this.selectedIcon, required this.label, required this.route});
+}
 
 class ScaffoldWithNavBar extends StatelessWidget {
   const ScaffoldWithNavBar({
@@ -10,112 +22,95 @@ class ScaffoldWithNavBar extends StatelessWidget {
   final Widget body;
 
   void _onItemTapped(BuildContext context, int index) {
-    switch (index) {
-      case 0:
-        context.go('/home');
-        break;
-      case 1:
-        context.go('/students');
-        break;
-      case 2:
-        context.go('/attendance');
-        break;
-      case 3:
-        context.go('/reports');
-        break;
-      case 4:
-        context.go('/settings');
-        break;
+    final userProv = Provider.of<UserProvider>(context, listen: false);
+    final items = _buildNavRoutes(userProv);
+    if (index < 0 || index >= items.length) return;
+    context.go(items[index].route);
+  }
+
+  // Helper to compute nav items and their target routes based on permissions
+  List<_NavItem> _buildNavRoutes(UserProvider userProv) {
+    // Default Home always present
+    final List<_NavItem> items = [
+      const _NavItem(icon: Icons.home_outlined, selectedIcon: Icons.home, label: 'Home', route: '/home'),
+    ];
+
+    // Students (HOD/CC) or if user has view_students permission
+    if (userProv.hasPermission('view_students') || userProv.isHod || userProv.isCc) {
+      items.add(const _NavItem(icon: Icons.people_outline, selectedIcon: Icons.people, label: 'Students', route: '/students'));
     }
+
+    // Attendance (CR/CC/HOD) - most users who can take/view attendance
+    if (userProv.hasPermission('take_attendance') || userProv.isCr || userProv.isCc || userProv.isHod) {
+      items.add(const _NavItem(icon: Icons.check_circle_outline, selectedIcon: Icons.check_circle, label: 'Attendance', route: '/attendance'));
+    }
+
+    // Reports
+    if (userProv.hasPermission('view_reports') || userProv.isCr || userProv.isCc || userProv.isHod) {
+      items.add(const _NavItem(icon: Icons.assessment_outlined, selectedIcon: Icons.assessment, label: 'Reports', route: '/reports'));
+    }
+
+    // Settings always present
+    items.add(const _NavItem(icon: Icons.settings_outlined, selectedIcon: Icons.settings, label: 'Settings', route: '/settings'));
+
+    return items;
   }
 
   @override
   Widget build(BuildContext context) {
     final path = GoRouterState.of(context).uri.path;
+    // Compute current index by matching path to nav items; fallback to 0
+    final userProv = Provider.of<UserProvider>(context);
+    final navItems = _buildNavRoutes(userProv);
     int currentIndex = 0;
-    if (path.startsWith('/students')) currentIndex = 1;
-    else if (path.startsWith('/attendance')) currentIndex = 2;
-    else if (path.startsWith('/reports')) currentIndex = 3;
-    else if (path.startsWith('/settings')) currentIndex = 4;
+    for (int i = 0; i < navItems.length; i++) {
+      if (path.startsWith(navItems[i].route)) {
+        currentIndex = i;
+        break;
+      }
+    }
 
     final isWide = MediaQuery.of(context).size.width >= 900;
+
+    // Debug floating action button to jump to the debug sign-in screen.
+    final Widget? debugFab = kDebugMode
+        ? FloatingActionButton(
+            onPressed: () => context.go('/debug-signin'),
+            child: const Icon(Icons.login),
+            tooltip: 'Debug Sign-in',
+          )
+        : null;
 
     if (isWide) {
       return Scaffold(
         body: Row(
           children: [
             NavigationRail(
-              selectedIndex: currentIndex,
+              selectedIndex: currentIndex.clamp(0, navItems.length - 1),
               onDestinationSelected: (i) => _onItemTapped(context, i),
               labelType: NavigationRailLabelType.selected,
               useIndicator: true,
-              destinations: const [
-                NavigationRailDestination(
-                  icon: Icon(Icons.home_outlined),
-                  selectedIcon: Icon(Icons.home),
-                  label: Text('Home'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.people_outline),
-                  selectedIcon: Icon(Icons.people),
-                  label: Text('Students'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.check_circle_outline),
-                  selectedIcon: Icon(Icons.check_circle),
-                  label: Text('Attendance'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.assessment_outlined),
-                  selectedIcon: Icon(Icons.assessment),
-                  label: Text('Reports'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.settings_outlined),
-                  selectedIcon: Icon(Icons.settings),
-                  label: Text('Settings'),
-                ),
-              ],
+              destinations: navItems
+                  .map((it) => NavigationRailDestination(icon: Icon(it.icon), selectedIcon: Icon(it.selectedIcon), label: Text(it.label)))
+                  .toList(),
             ),
             const VerticalDivider(width: 1),
             Expanded(child: body),
           ],
         ),
+        floatingActionButton: debugFab,
       );
     }
 
     return Scaffold(
       body: body,
+      floatingActionButton: debugFab,
       bottomNavigationBar: NavigationBar(
-        selectedIndex: currentIndex,
+        selectedIndex: currentIndex.clamp(0, navItems.length - 1),
         onDestinationSelected: (index) => _onItemTapped(context, index),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home),
-            label: 'Home',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.people_outline),
-            selectedIcon: Icon(Icons.people),
-            label: 'Students',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.check_circle_outline),
-            selectedIcon: Icon(Icons.check_circle),
-            label: 'Attendance',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.assessment_outlined),
-            selectedIcon: Icon(Icons.assessment),
-            label: 'Reports',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
-            label: 'Settings',
-          ),
-        ],
+        destinations: navItems
+            .map((it) => NavigationDestination(icon: Icon(it.icon), selectedIcon: Icon(it.selectedIcon), label: it.label))
+            .toList(),
       ),
     );
   }

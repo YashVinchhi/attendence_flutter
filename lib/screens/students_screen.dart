@@ -201,16 +201,16 @@ class _StudentsScreenState extends State<StudentsScreen> {
         if (success) {
           Navigator.of(context).pop();
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text('Student added successfully'),
-              backgroundColor: Colors.green,
+              backgroundColor: Theme.of(context).colorScheme.primary,
             ),
           );
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(studentProvider.errorMessage ?? 'Failed to add student'),
-              backgroundColor: Colors.red,
+              backgroundColor: Theme.of(context).colorScheme.error,
             ),
           );
           studentProvider.clearError();
@@ -224,7 +224,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error adding student: $e'),
-            backgroundColor: Colors.red,
+            backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
       }
@@ -388,11 +388,11 @@ class _StudentsScreenState extends State<StudentsScreen> {
           Navigator.of(context).pop();
           _editingStudent = null;
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Student updated successfully'), backgroundColor: Colors.green),
+            SnackBar(content: Text('Student updated successfully'), backgroundColor: Theme.of(context).colorScheme.primary),
           );
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(studentProvider.errorMessage ?? 'Failed to update student'), backgroundColor: Colors.red),
+            SnackBar(content: Text(studentProvider.errorMessage ?? 'Failed to update student'), backgroundColor: Theme.of(context).colorScheme.error),
           );
           studentProvider.clearError();
         }
@@ -403,7 +403,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
           _isAddingStudent = false;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error updating student: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Error updating student: $e'), backgroundColor: Theme.of(context).colorScheme.error),
         );
       }
     }
@@ -423,7 +423,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
           ),
           ElevatedButton(
             onPressed: () => Navigator.of(context).pop(true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
             child: const Text('Delete'),
           ),
         ],
@@ -532,7 +532,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error reading file: $e'),
-            backgroundColor: Colors.red,
+            backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
       }
@@ -556,7 +556,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
               Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: Colors.grey[100],
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: const Text(
@@ -652,7 +652,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('Import failed: $e'),
-              backgroundColor: Colors.red,
+              backgroundColor: Theme.of(context).colorScheme.error,
             ),
           );
         }
@@ -680,13 +680,13 @@ class _StudentsScreenState extends State<StudentsScreen> {
                 Text('Successfully imported: $imported out of $total students'),
                 if (errors.isNotEmpty) ...[
                   const SizedBox(height: 16),
-                  const Text('Errors:', style: TextStyle(fontWeight: FontWeight.bold)),
+                  Text('Errors:', style: TextStyle(fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.onSurface)),
                   const SizedBox(height: 8),
                   Container(
                     height: 200,
                     width: double.maxFinite,
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey),
+                      border: Border.all(color: Theme.of(context).colorScheme.outline),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: ListView.builder(
@@ -696,7 +696,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
                           padding: const EdgeInsets.all(4),
                           child: Text(
                             errors[index],
-                            style: const TextStyle(fontSize: 12, color: Colors.red),
+                            style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.error),
                           ),
                         );
                       },
@@ -732,22 +732,22 @@ class _StudentsScreenState extends State<StudentsScreen> {
             padding: const EdgeInsets.all(12.0),
             child: Row(
               children: [
-                const CircleAvatar(radius: 20, backgroundColor: Colors.white24),
+                CircleAvatar(radius: 20, backgroundColor: base),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Container(height: 14, width: 160, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8))),
+                      Container(height: 14, width: 160, decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(8))),
                       const SizedBox(height: 8),
-                      Container(height: 12, width: 220, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8))),
+                      Container(height: 12, width: 220, decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(8))),
                     ],
                   ),
                 ),
                 const SizedBox(width: 12),
-                Container(width: 24, height: 24, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(6))),
+                Container(width: 24, height: 24, decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(6))),
                 const SizedBox(width: 8),
-                Container(width: 24, height: 24, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(6))),
+                Container(width: 24, height: 24, decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(6))),
               ],
             ),
           ),
@@ -807,13 +807,30 @@ class _StudentsScreenState extends State<StudentsScreen> {
             onPressed: _importFromCsv,
             tooltip: 'Import Students from CSV',
           ),
-          PopupMenuButton<String>(
-            onSelected: (value) {
-              if (value == 'reset') _resetSampleData();
+          IconButton(
+            icon: const Icon(Icons.more_vert),
+            tooltip: 'More',
+            onPressed: () async {
+              final choice = await showDialog<String>(
+                context: context,
+                builder: (ctx) => SimpleDialog(
+                  title: const Text('Options'),
+                  children: [
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, 'reset'),
+                      child: const Text('Reset sample data'),
+                    ),
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, null),
+                      child: const Text('Cancel'),
+                    ),
+                  ],
+                ),
+              );
+              if (choice == 'reset') {
+                await _resetSampleData();
+              }
             },
-            itemBuilder: (context) => [
-              const PopupMenuItem(value: 'reset', child: Text('Reset sample data')),
-            ],
           ),
         ],
       ),
@@ -879,7 +896,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
                                 }),
                                 foregroundColor: WidgetStateProperty.resolveWith((states) {
                                   final selected = states.contains(WidgetState.selected);
-                                  return selected ? Colors.white : Theme.of(context).colorScheme.onSurface;
+                                  return selected ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onSurface;
                                 }),
                                 backgroundColor: WidgetStateProperty.resolveWith((states) {
                                   final selected = states.contains(WidgetState.selected);
@@ -971,12 +988,12 @@ class _StudentsScreenState extends State<StudentsScreen> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.edit, color: Colors.blue),
+                                icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
                                 onPressed: () => _showEditStudentDialog(student),
                                 tooltip: 'Edit',
                               ),
                               IconButton(
-                                icon: const Icon(Icons.delete, color: Colors.red),
+                                icon: Icon(Icons.delete, color: Theme.of(context).colorScheme.error),
                                 onPressed: () => _deleteStudent(student),
                               ),
                             ],

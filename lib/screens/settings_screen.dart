@@ -1,11 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
+import 'package:csv/csv.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:share_plus/share_plus.dart';
+import '../services/database_helper.dart';
 import '../providers/theme_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/student_provider.dart';
 import '../providers/attendance_provider.dart';
 import '../services/navigation_service.dart';
+import '../providers/auth_provider.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -22,7 +29,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     final settingsProvider = Provider.of<SettingsProvider>(context, listen: false);
-    _schoolNameController.text = settingsProvider.schoolName;
+    // If provider holds default placeholder, prefer 'SOE RKU' as requested.
+    final providerName = settingsProvider.schoolName;
+    _schoolNameController.text = (providerName.trim().isEmpty || providerName == 'Your School Name') ? 'SOE RKU' : providerName;
     _academicYearController.text = settingsProvider.academicYear;
   }
 
@@ -39,9 +48,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final bool? confirmed = await navigationService.showDialogSafely<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Clear All Data'),
+        title: const Text('Clear Local Data'),
         content: const Text(
-          'Are you sure you want to delete all data? This action cannot be undone.',
+          'This will permanently remove all students and attendance stored locally on this device only. It will NOT delete any data already synced to the cloud (Firestore). Continue?',
         ),
         actions: [
           TextButton(
@@ -50,8 +59,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Clear'),
+            style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+            child: const Text('Clear Local Data'),
           ),
         ],
       ),
@@ -96,8 +105,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(success ? 'All data cleared successfully!' : 'Failed to clear data'),
-            backgroundColor: success ? Colors.green : Colors.red,
+            content: Text(success ? 'Local data cleared (cloud data retained).' : 'Failed to clear local data'),
+            backgroundColor: success ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.error,
           ),
         );
       }
@@ -111,8 +120,184 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error: $e'),
-            backgroundColor: Colors.red,
+            backgroundColor: Theme.of(context).colorScheme.error,
           ),
+        );
+      }
+    }
+  }
+
+  // New: Backup students and attendance to a CSV file and offer to share/save it
+  Future<void> _backupData() async {
+    final navigationService = Provider.of<NavigationService>(context, listen: false);
+    try {
+      // Show loading dialog
+      navigationService.showDialogSafely(
+        context: context,
+        barrierDismissible: false,
+        useRootNavigator: true,
+        builder: (ctx) => const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Expanded(child: Text('Preparing backup...')),
+            ],
+          ),
+        ),
+      );
+
+      final dbHelper = DatabaseHelper.instance;
+
+      // Fetch students and attendance
+      final students = await dbHelper.getAllStudents();
+
+      // Build CSV sections: header row for students, then a separator, then attendance rows
+      List<List<dynamic>> csvRows = [];
+
+      // Students header
+      csvRows.add(['STUDENTS']);
+      csvRows.add(['id', 'name', 'roll_number', 'semester', 'department', 'division', 'time_slot', 'created_at']);
+      for (final s in students) {
+        csvRows.add([
+          s.id ?? '',
+          s.name,
+          s.rollNumber,
+          s.semester,
+          s.department,
+          s.division,
+          s.timeSlot,
+          s.createdAt.toIso8601String(),
+        ]);
+      }
+
+      // Attendance header
+      csvRows.add([]);
+      csvRows.add(['ATTENDANCE']);
+      csvRows.add(['id', 'student_id', 'date', 'is_present', 'lecture', 'notes', 'created_at', 'updated_at']);
+
+      // For attendance, fetch all records in date order
+      final tempDir = await getApplicationDocumentsDirectory();
+      final dbPath = tempDir.path; // reuse to get directory
+
+      // Query attendance table directly using helper method: getAttendanceByDateRange covering wide span
+      // We will try to cover last 10 years to fetch everything
+      final now = DateTime.now();
+      final fromDate = DateTime(now.year - 10, now.month, now.day).toIso8601String().substring(0, 10);
+      final toDate = now.toIso8601String().substring(0, 10);
+      final attendanceRows = await dbHelper.getAttendanceByDateRange(fromDate, toDate);
+
+      for (final a in attendanceRows) {
+        csvRows.add([
+          a.id ?? '',
+          a.studentId,
+          a.date.toIso8601String().substring(0, 10),
+          a.isPresent ? 1 : 0,
+          a.lecture ?? '',
+          a.notes ?? '',
+          a.createdAt?.toIso8601String() ?? '',
+          a.updatedAt?.toIso8601String() ?? '',
+        ]);
+      }
+
+      final csv = const ListToCsvConverter().convert(csvRows);
+
+      final fileName = 'attendance_backup_${DateTime.now().toIso8601String().replaceAll(':', '-')}.csv';
+      final file = File(joinPaths(dbPath, fileName));
+      await file.writeAsString(csv);
+
+      // Close loading dialog
+      await navigationService.popDialog(context, useRootNavigator: true);
+
+      // Offer to share the file using top-level Share API
+      await Share.shareXFiles([XFile(file.path)], text: 'Attendance backup generated');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Backup created: ${file.path}')),
+        );
+      }
+    } catch (e) {
+      try {
+        final navigationService = Provider.of<NavigationService>(context, listen: false);
+        await navigationService.popDialog(context, useRootNavigator: true);
+      } catch (_) {}
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Backup failed: $e'), backgroundColor: Theme.of(context).colorScheme.error),
+        );
+      }
+    }
+  }
+
+  // New: Restore students from a CSV file (uses StudentProvider.bulkImportFromCsv)
+  Future<void> _restoreData() async {
+    final navigationService = Provider.of<NavigationService>(context, listen: false);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+      );
+
+      if (result == null || result.files.isEmpty) return; // user cancelled
+
+      final fileBytes = result.files.first.bytes;
+      final filePath = result.files.first.path;
+
+      String csvContent;
+      if (fileBytes != null) {
+        csvContent = String.fromCharCodes(fileBytes);
+      } else if (filePath != null) {
+        csvContent = await File(filePath).readAsString();
+      } else {
+        throw Exception("Selected file couldn't be read");
+      }
+
+      // Show loading dialog
+      navigationService.showDialogSafely(
+        context: context,
+        barrierDismissible: false,
+        useRootNavigator: true,
+        builder: (ctx) => const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Expanded(child: Text('Importing data...')),
+            ],
+          ),
+        ),
+      );
+
+      final studentProvider = Provider.of<StudentProvider>(context, listen: false);
+      final resultMap = await studentProvider.bulkImportFromCsv(csvContent);
+
+      await navigationService.popDialog(context, useRootNavigator: true);
+
+      if (resultMap['success'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Import completed: ${resultMap['imported']}/${resultMap['total']}')),
+        );
+      } else {
+        final errors = (resultMap['errors'] as List<dynamic>?)?.join('\n') ?? resultMap['message'] ?? 'Unknown error';
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Import Result'),
+            content: SingleChildScrollView(child: Text(errors)),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('OK')),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      try {
+        await navigationService.popDialog(context, useRootNavigator: true);
+      } catch (_) {}
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Restore failed: $e'), backgroundColor: Theme.of(context).colorScheme.error),
         );
       }
     }
@@ -120,6 +305,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final onSurface = scheme.onSurface;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
@@ -140,9 +328,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         'App Settings',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(color: onSurface, fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 16),
                       ListTile(
@@ -182,9 +370,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         'School Information',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(color: onSurface, fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 16),
                       TextField(
@@ -225,15 +413,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         'Attendance Settings',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(color: onSurface, fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 16),
                       ListTile(
                         leading: const Icon(Icons.warning),
-                        title: const Text('Minimum Attendance Percentage'),
-                        subtitle: Text('Current: ${settingsProvider.minimumAttendancePercentage}%'),
+                        title: Text('Minimum Attendance Percentage', style: TextStyle(color: onSurface)),
+                        subtitle: Text('Current: ${settingsProvider.minimumAttendancePercentage}%', style: TextStyle(color: onSurface.withAlpha((0.85 * 255).round()))),
                         trailing: SizedBox(
                           width: 100,
                           child: Slider(
@@ -262,25 +450,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         'App Information',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(color: onSurface, fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 16),
-                      const ListTile(
-                        leading: Icon(Icons.info),
-                        title: Text('App Version'),
-                        subtitle: Text('1.0.0'),
+                      ListTile(
+                        leading: const Icon(Icons.info),
+                        title: Text('App Version', style: TextStyle(color: onSurface)),
+                        subtitle: Text('1.0.0', style: TextStyle(color: onSurface.withAlpha((0.85 * 255).round()))),
                       ),
-                      const ListTile(
-                        leading: Icon(Icons.description),
-                        title: Text('About'),
-                        subtitle: Text('Attendance Management System for Educational Institutions'),
+                      ListTile(
+                        leading: const Icon(Icons.description),
+                        title: Text('About', style: TextStyle(color: onSurface)),
+                        subtitle: Text('Attendance Management System for Educational Institutions', style: TextStyle(color: onSurface.withAlpha((0.85 * 255).round()))),
                       ),
                       ListTile(
                         leading: const Icon(Icons.developer_mode),
-                        title: const Text('Developed by'),
-                        subtitle: const Text('Flutter Team'),
+                        title: Text('Developed by', style: TextStyle(color: onSurface)),
+                        subtitle: Text('Yash Vinchhi', style: TextStyle(color: onSurface.withAlpha((0.85 * 255).round()))),
                         onTap: () {
                           showDialog(
                             context: context,
@@ -314,42 +502,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         'Data Management',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(color: onSurface, fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 16),
                       ListTile(
                         leading: const Icon(Icons.backup),
-                        title: const Text('Backup Data'),
-                        subtitle: const Text('Export all data as CSV'),
+                        title: Text('Backup Data', style: TextStyle(color: onSurface)),
+                        subtitle: Text('Export all data as CSV', style: TextStyle(color: onSurface.withAlpha((0.85 * 255).round()))),
                         onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Backup feature coming soon!'),
-                            ),
-                          );
+                          _backupData();
                         },
                       ),
                       ListTile(
                         leading: const Icon(Icons.restore),
-                        title: const Text('Restore Data'),
-                        subtitle: const Text('Import data from CSV'),
+                        title: Text('Restore Data', style: TextStyle(color: onSurface)),
+                        subtitle: Text('Import data from CSV', style: TextStyle(color: onSurface.withAlpha((0.85 * 255).round()))),
                         onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Restore feature coming soon!'),
-                            ),
-                          );
+                          _restoreData();
                         },
                       ),
                       ListTile(
-                        leading: const Icon(Icons.delete_forever, color: Colors.red),
-                        title: const Text('Clear All Data'),
-                        subtitle: const Text('Delete all students and attendance records'),
+                        leading: Icon(Icons.delete_forever, color: Theme.of(context).colorScheme.error),
+                        title: Text('Clear All Data', style: TextStyle(color: onSurface)),
+                        subtitle: Text('Delete all students and attendance records', style: TextStyle(color: onSurface.withAlpha((0.85 * 255).round()))),
                         onTap: () {
                           _clearAllData();
                         },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Account actions
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Account', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: onSurface, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 12),
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
+                        onPressed: () async {
+                          final confirmed = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: const Text('Sign out'),
+                              content: const Text('Are you sure you want to sign out?'),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+                                ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error), child: const Text('Sign out')),
+                              ],
+                            ),
+                          );
+                          if (confirmed == true) {
+                            try {
+                              await AuthProvider.instance.signOut();
+                              if (!mounted) return;
+                              // Redirect to sign-in (router redirect will also handle this)
+                              context.go('/signin');
+                              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Signed out')));
+                            } catch (e) {
+                              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Sign out failed: $e')));
+                            }
+                          }
+                        },
+                        icon: const Icon(Icons.logout),
+                        label: const Text('Sign out'),
                       ),
                     ],
                   ),
@@ -363,4 +588,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
   }
+}
+
+// Helper to join paths without introducing new dependency
+String joinPaths(String a, String b) {
+  if (a.endsWith(Platform.pathSeparator)) return '$a$b';
+  return '$a${Platform.pathSeparator}$b';
 }

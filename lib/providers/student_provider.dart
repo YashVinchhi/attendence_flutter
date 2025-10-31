@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:csv/csv.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/models.dart';
 import '../services/database_helper.dart';
 
@@ -394,6 +396,13 @@ class StudentProvider with ChangeNotifier {
               final s = student.copyWith(id: id);
               batchAdded.add(s);
               allAdded.add(s);
+            } on DatabaseException catch (dbEx) {
+              final msg = dbEx.toString();
+              if (msg.toLowerCase().contains('unique') || msg.toLowerCase().contains('constraint')) {
+                errors.add('Failed to insert ${student.name} (${student.rollNumber}): duplicate roll number (unique constraint)');
+              } else {
+                errors.add('Failed to insert ${student.name} (${student.rollNumber}): ${dbEx.toString()}');
+              }
             } catch (e) {
               errors.add('Failed to insert ${student.name} (${student.rollNumber}): ${e.toString()}');
             }
@@ -406,6 +415,30 @@ class StudentProvider with ChangeNotifier {
         _students.addAll(batchAdded);
         _sortStudents();
         _safeNotifyListeners();
+
+        // Attempt to sync this batch to Firestore (best-effort). Use roll number as document id
+        // for idempotency. Any Firestore errors are recorded but do not abort the local import.
+        try {
+          final firestore = FirebaseFirestore.instance;
+          final fbBatch = firestore.batch();
+          for (final s in batchAdded) {
+            final docId = s.rollNumber.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_').toUpperCase();
+            final docRef = firestore.collection('students').doc(docId);
+            fbBatch.set(docRef, {
+              'name': s.name,
+              'rollNumber': s.rollNumber,
+              'semester': s.semester,
+              'department': s.department,
+              'division': s.division,
+              'timeSlot': s.timeSlot,
+              'localId': s.id,
+              'createdAt': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
+          }
+          await fbBatch.commit();
+        } catch (fbErr) {
+          errors.add('Firestore sync failed for batch starting at ${i}: ${fbErr.toString()}');
+        }
       }
 
       _setState(StudentProviderState.idle);
@@ -490,8 +523,8 @@ class StudentProvider with ChangeNotifier {
           String c0 = row[0]?.toString().trim() ?? '';
           String c1 = row[1]?.toString().trim() ?? '';
 
-          String? roll;
-          String? name;
+          String roll = '';
+          String name = '';
 
           final rollFromC0 = _extractDeptDivFromRoll(c0) != null || ValidationHelper.isValidRollNumber(c0);
           final rollFromC1 = _extractDeptDivFromRoll(c1) != null || ValidationHelper.isValidRollNumber(c1);
@@ -509,12 +542,12 @@ class StudentProvider with ChangeNotifier {
             continue;
           }
 
-          if ((name?.isEmpty ?? true) || (roll?.isEmpty ?? true)) {
+          if (name.isEmpty || roll.isEmpty) {
             errors.add('Row $rowNumber: Empty required fields');
             continue;
           }
 
-          final inferred = _extractDeptDivFromRoll(roll!);
+          final inferred = _extractDeptDivFromRoll(roll);
           if (inferred == null) {
             errors.add('Row $rowNumber: Roll "$roll" not in expected pattern like CE-B:01');
             continue;
@@ -528,7 +561,7 @@ class StudentProvider with ChangeNotifier {
           existingRollNumbers.add(normalizedRollNumber);
 
           final student = Student(
-            name: name!,
+            name: name,
             rollNumber: roll,
             semester: 3, // Default when not provided
             department: inferred['department']!,

@@ -11,11 +11,20 @@ class Lock {
     _completer = Completer<void>();
     try {
       final result = await computation();
-      _completer?.complete();
+      // Guard complete to avoid StateError if already completed
+      if (_completer != null && !_completer!.isCompleted) {
+        try {
+          _completer!.complete();
+        } catch (_) {}
+      }
       _completer = null;
       return result;
     } catch (e) {
-      _completer?.complete();
+      if (_completer != null && !_completer!.isCompleted) {
+        try {
+          _completer!.complete();
+        } catch (_) {}
+      }
       _completer = null;
       rethrow;
     }
@@ -28,7 +37,6 @@ class NavigationService {
   NavigationService._internal();
 
   final _navigatorLock = Lock();
-  bool _isNavigating = false;
   bool _isDisposed = false;
 
   GlobalKey<NavigatorState>? _rootNavigatorKey;
@@ -40,16 +48,23 @@ class NavigationService {
     if (_isDisposed) return;
     // Mark disposed and release any pending locks without awaiting
     _isDisposed = true;
-    _isNavigating = false;
-    _navigatorLock._completer?.complete();
+    // Defensive: only complete if completer exists and is not completed
+    if (_navigatorLock._completer != null && !_navigatorLock._completer!.isCompleted) {
+      try {
+        _navigatorLock._completer!.complete();
+      } catch (_) {}
+    }
     _navigatorLock._completer = null;
     _rootNavigatorKey = null;
   }
 
   void refreshRoutes() {
     if (_isDisposed) return;
-    _isNavigating = false;
-    _navigatorLock._completer?.complete();
+    if (_navigatorLock._completer != null && !_navigatorLock._completer!.isCompleted) {
+      try {
+        _navigatorLock._completer!.complete();
+      } catch (_) {}
+    }
     _navigatorLock._completer = null;
   }
 
@@ -63,7 +78,6 @@ class NavigationService {
 
     return await _navigatorLock.synchronized(() async {
       if (!context.mounted || _isDisposed) return null;
-      _isNavigating = true;
       try {
         return await showDialog<T>(
           context: context,
@@ -72,9 +86,7 @@ class NavigationService {
           builder: builder,
         );
       } finally {
-        if (!_isDisposed) {
-          _isNavigating = false;
-        }
+        // no-op
       }
     });
   }
