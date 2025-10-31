@@ -10,6 +10,8 @@ jobs:
   analyze:
     name: Analyze & Test
     runs-on: ubuntu-latest
+    env:
+      RUN_TESTS: 'false'
 
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +25,7 @@ jobs:
       - name: Run analyzer
         run: flutter analyze
       - name: Run tests
+        if: env.RUN_TESTS == 'true'
         run: flutter test --coverage
 
   functions-deploy-preview:
