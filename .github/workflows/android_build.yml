@@ -15,10 +15,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Flutter
+      - name: Set up Flutter (pin explicit stable release)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 'stable'
+          # Pin to a concrete stable Flutter version to avoid channel resolution failures
+          flutter-version: '3.10.6'
+          cache: true
+
+      - name: Diagnostic: show flutter/java versions and PATH
+        run: |
+          flutter --version || true
+          java -version || true
+          echo PATH=$PATH
 
       - name: Install dependencies
         run: flutter pub get
