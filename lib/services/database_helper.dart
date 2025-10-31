@@ -1,6 +1,10 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import 'package:flutter/services.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import '../models/models.dart';
 
 class DatabaseHelper {
@@ -43,43 +47,50 @@ class DatabaseHelper {
   // version matches. This covers the case where a DB was created without the
   // newer columns but its version already equals the runtime version.
   Future<void> _ensureColumnsExist(Database db) async {
+    // Cache table schemas to avoid repeated PRAGMA calls
+    final Map<String, List<String>> tableSchemas = {};
+
     Future<bool> _columnExists(String table, String column) async {
-      try {
-        final info = await db.rawQuery('PRAGMA table_info("$table")');
-        for (final row in info) {
-          final name = row['name']?.toString();
-          if (name == column) return true;
+      if (!tableSchemas.containsKey(table)) {
+        try {
+          final info = await db.rawQuery('PRAGMA table_info("$table")');
+          tableSchemas[table] = info.map((row) => row['name']?.toString() ?? '').toList();
+        } catch (_) {
+          tableSchemas[table] = [];
         }
-      } catch (_) {}
-      return false;
+      }
+      return tableSchemas[table]?.contains(column) ?? false;
     }
 
-    // students.time_slot
+    // Centralized index creation
+    Future<void> _createIndex(String indexName, String table, String columns) async {
+      try {
+        await db.execute('CREATE INDEX IF NOT EXISTS $indexName ON $table($columns)');
+      } catch (e) {
+        print('Could not create index $indexName: $e');
+      }
+    }
+
+    // Ensure columns exist
     try {
       if (!await _columnExists('students', 'time_slot')) {
         await db.execute('ALTER TABLE students ADD COLUMN time_slot TEXT NOT NULL DEFAULT "8:00-8:50"');
       }
-    } catch (e) {
-      print('Could not add students.time_slot column in _ensureColumnsExist: $e');
-    }
-
-    // attendance.time_slot
-    try {
+      if (!await _columnExists('students', 'enrollment_number')) {
+        await db.execute('ALTER TABLE students ADD COLUMN enrollment_number TEXT NOT NULL DEFAULT ""');
+      }
       if (!await _columnExists('attendance', 'time_slot')) {
         await db.execute('ALTER TABLE attendance ADD COLUMN time_slot TEXT DEFAULT ""');
       }
     } catch (e) {
-      print('Could not add attendance.time_slot column in _ensureColumnsExist: $e');
+      print('Could not ensure columns: $e');
     }
 
-    // Ensure indexes exist (safe to call)
-    try {
-      await db.execute('CREATE INDEX IF NOT EXISTS idx_students_roll_number ON students(roll_number)');
-      await db.execute('CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance(student_id, date)');
-      await db.execute('CREATE INDEX IF NOT EXISTS idx_attendance_lecture ON attendance(lecture)');
-    } catch (e) {
-      print('Could not ensure indexes in _ensureColumnsExist: $e');
-    }
+    // Ensure indexes exist
+    await _createIndex('idx_students_roll_number', 'students', 'roll_number');
+    await _createIndex('idx_students_enrollment_number', 'students', 'enrollment_number');
+    await _createIndex('idx_attendance_student_date', 'attendance', 'student_id, date');
+    await _createIndex('idx_attendance_lecture', 'attendance', 'lecture');
   }
 
   Future _createDB(Database db, int version) async {
@@ -92,6 +103,7 @@ class DatabaseHelper {
         id $idType,
         name $textType,
         roll_number $textType UNIQUE,
+        enrollment_number TEXT,
         semester $integerType,
         department $textType,
         division $textType,
@@ -204,6 +216,20 @@ class DatabaseHelper {
           }
         }
       }
+      // Ensure enrollment_number exists for older DBs too
+      if (!await _columnExists(db, 'students', 'enrollment_number')) {
+        try {
+          await db.execute('ALTER TABLE students ADD COLUMN enrollment_number TEXT NOT NULL DEFAULT ""');
+        } catch (e) {
+          print('Could not add students.enrollment_number column during upgrade: $e');
+        }
+      }
+      // Ensure index on enrollment_number
+      try {
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_students_enrollment_number ON students(enrollment_number)');
+      } catch (e) {
+        print('Could not create idx_students_enrollment_number: $e');
+      }
     } catch (e) {
       print('Migration check failed: $e');
     }
@@ -213,118 +239,38 @@ class DatabaseHelper {
   Future<void> loadSampleData() async {
     try {
       final db = await database;
-
-      // Check if we already have students
       final existingStudents = await db.query('students', limit: 1);
       if (existingStudents.isNotEmpty) {
         print('Sample data already loaded, skipping...');
         return;
       }
 
-      // Check if user has previously cleared data - if so, don't auto-load sample data
       final prefs = await SharedPreferences.getInstance();
       final hasUserClearedData = prefs.getBool('user_cleared_data') ?? false;
-
       if (hasUserClearedData) {
         print('User has cleared data, not loading sample data automatically');
         return;
       }
 
-      print('Loading sample data from CEIT-B.csv...');
+      print('Loading sample data from configuration file...');
+      final sampleData = await rootBundle.loadString('assets/sample_data/students.json');
+      final List<dynamic> students = json.decode(sampleData);
 
-      // Sample data for CEIT-B (3rd semester, Division B)
-      final sampleStudents = [
-        // CE Students
-        {'name': 'KANJARIYA VAISHALIBEN BHIKHABHAI', 'rollNumber': 'CE-B:01', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'ASODARIYA HETAL MUKESHBHAI', 'rollNumber': 'CE-B:02', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'BARASIYA MEET JAYANTIBHAI', 'rollNumber': 'CE-B:03', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'BHESANIYA HENSI RAMESHBHAI', 'rollNumber': 'CE-B:04', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'DHADUK DHYEY BHAVINBHAI', 'rollNumber': 'CE-B:05', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'DUDHATRA ISHA PANKAJBHAI', 'rollNumber': 'CE-B:06', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'HIRANI AASHKA', 'rollNumber': 'CE-B:07', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'KADIVAR MUSKANBANU MUSTUFA', 'rollNumber': 'CE-B:08', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'KANSAGARA MANAV AJAYBHAI', 'rollNumber': 'CE-B:09', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'KARANGIYA BHAVIN VIJAYBHAI', 'rollNumber': 'CE-B:10', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'KOTHIVAR ARJUN NATVARBHAI', 'rollNumber': 'CE-B:11', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'LIMBASIYA DEV RAJESHBHAI', 'rollNumber': 'CE-B:12', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'MANEK DARSH NILESHBHAI', 'rollNumber': 'CE-B:13', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'NAKUM DIVYA SHAILESHBHAI', 'rollNumber': 'CE-B:14', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'NANERA UDAY MUKESHBHAI', 'rollNumber': 'CE-B:15', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'NIMAVAT DISHA HITESHBHAI', 'rollNumber': 'CE-B:16', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'PADHIYAR JAYRAJSINH SURUBHA', 'rollNumber': 'CE-B:17', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'PANARA TARUN MAHENDRABHAI', 'rollNumber': 'CE-B:18', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'PATAL DIPAK GANGABHAI', 'rollNumber': 'CE-B:19', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'POKAL KRISH', 'rollNumber': 'CE-B:20', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'RAMANI MANSI DAMJIBHAI', 'rollNumber': 'CE-B:21', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SADADIYA PRIYANSHU DILIPBHAI', 'rollNumber': 'CE-B:22', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SANGANI DHRUVKUMAR KANTILAL', 'rollNumber': 'CE-B:23', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SANYAJA TIRTH KALPESHBHAI', 'rollNumber': 'CE-B:24', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SARENA VISHALKUAMAR PRAKASHBHAI', 'rollNumber': 'CE-B:25', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SAVALIYA BINAL BHARATBHAI', 'rollNumber': 'CE-B:26', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SOLANKI KINJALBEN SANJAYBHAI', 'rollNumber': 'CE-B:27', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SUTARIYA TEJASKUMAR NARESHBHAI', 'rollNumber': 'CE-B:28', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'TAGADIYA KRISH DAMJIBHAI', 'rollNumber': 'CE-B:29', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'TRAPASIYA JENSHI RASIKBHAI', 'rollNumber': 'CE-B:30', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'VAGHELA SHAKTISINH KIRITSINH', 'rollNumber': 'CE-B:31', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'VARMORA DHARM PRAKASHBHAI', 'rollNumber': 'CE-B:32', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'VEKARIYA VATSAL RAKESHBHAI', 'rollNumber': 'CE-B:33', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'VINCHHI YASH HEMENDRABHAI', 'rollNumber': 'CE-B:34', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'VIRADIYA DHRUTI PRAVINBHAI', 'rollNumber': 'CE-B:35', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'MEET DESAI', 'rollNumber': 'CE-B:36', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'JANI VISHESH RAKESHKUMAR', 'rollNumber': 'CE-B:37', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SHEIKH RAJIBUL ABBASUDDIN', 'rollNumber': 'CE-B:38', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'SOLANKI RAHIL AMITBHAI', 'rollNumber': 'CE-B:39', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'PRAJAPATI VIRAL VINODBHAI', 'rollNumber': 'CE-B:40', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'DOBARIYA DHRUMIT BHIKHALAL', 'rollNumber': 'CE-B:41', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'DOBARIYA HETVI RAJESHBHAI', 'rollNumber': 'CE-B:42', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'METALIYA KANHAI DIPAKBHAI', 'rollNumber': 'CE-B:43', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'GORASIYA DEEPKUMAR JAYESHBHAI', 'rollNumber': 'CE-B:44', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'DHRUVIL KHUNT', 'rollNumber': 'CE-B:45', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'CHIRAG KISHAN FOFANDI', 'rollNumber': 'CE-B:46', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'DHANKECHA MANTHAN VIPULBHAI', 'rollNumber': 'CE-B:47', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'TOGADIYA VINAY KALPESHBHAI', 'rollNumber': 'CE-B:48', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'DOBARIYA HARSHAL JAGDISHBHAI', 'rollNumber': 'CE-B:49', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'BAGDA MAHEK DILIPBHAI', 'rollNumber': 'CE-B:50', 'semester': 3, 'department': 'CE', 'division': 'B'},
-        {'name': 'FENIL PIPROTAR', 'rollNumber': 'CE-B:51', 'semester': 3, 'department': 'CE', 'division': 'B'},
+      for (final student in students) {
+        await db.insert('students', {
+          'name': student['name'],
+          'roll_number': student['rollNumber'],
+          'semester': student['semester'],
+          'department': student['department'],
+          'division': student['division'],
+          'time_slot': student['timeSlot'] ?? "8:00-8:50",
+          'created_at': DateTime.now().toIso8601String(),
+        });
+      }
 
-        // IT Students
-        {'name': 'BHALIYA GAURAVBHAI MAVJIBHAI', 'rollNumber': 'IT-B:01', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'DUDHAIYA RACHIT VIPULBHAI', 'rollNumber': 'IT-B:02', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'JAVIYA ARYAN RAKESHBHAI', 'rollNumber': 'IT-B:03', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'KAIDA MOHMADREHAN SIRAJBHAI', 'rollNumber': 'IT-B:04', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'KANANI JENISH VINODBHAI', 'rollNumber': 'IT-B:05', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'KATHROTIYA HET RAMESHBHAI', 'rollNumber': 'IT-B:06', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'KHATRA VRUDANT VIJAYBHAI', 'rollNumber': 'IT-B:07', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'PARASARA MUFIZ JAHIDABBAS', 'rollNumber': 'IT-B:08', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'PATALIYA NILESH MANOJBHAI', 'rollNumber': 'IT-B:09', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'RAMANI HET VIPULKUMA', 'rollNumber': 'IT-B:10', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'RAVAL MINAL PANKAJBHAI', 'rollNumber': 'IT-B:11', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'SONAGARA DEVAL RAMESHBHAI', 'rollNumber': 'IT-B:12', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'NANERA MILAN', 'rollNumber': 'IT-B:13', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'RAIJADA JEETRAJSINH KRISHNENDRASINH', 'rollNumber': 'IT-B:14', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'KOYANI SMIT HITESHKUMAR', 'rollNumber': 'IT-B:15', 'semester': 3, 'department': 'IT', 'division': 'B'},
-        {'name': 'PRINCE KAMLESH PARMAR', 'rollNumber': 'IT-B:16', 'semester': 3, 'department': 'IT', 'division': 'B'},
-      ];
-
-      // Insert sample students using transaction for atomicity
-      await db.transaction((txn) async {
-        for (final studentData in sampleStudents) {
-          final student = Student(
-            name: studentData['name']! as String,
-            rollNumber: studentData['rollNumber']! as String,
-            semester: studentData['semester']! as int,
-            department: studentData['department']! as String,
-            division: studentData['division']! as String,
-            timeSlot: '8:00-8:50', // Default time slot for sample data
-          );
-
-          await txn.insert('students', student.toMap());
-        }
-      });
-
-      print('Successfully loaded ${sampleStudents.length} sample students (CEIT-B)');
+      print('Sample data loaded successfully.');
     } catch (e) {
-      print('Error loading sample data: $e');
+      print('Failed to load sample data: $e');
     }
   }
 
@@ -640,189 +586,213 @@ class DatabaseHelper {
     return ['A', 'B', 'C', 'D'];
   }
 
-  // Get common lectures/subjects for different semesters and departments
-  List<String> getLectures(int semester, String department) {
-    Map<String, List<String>> lecturesByDept = {
-      'CE': [
-        'DCN (Parita ma\'am)',
-        'DS (Janki ma\'am)',
-        'Maths (Purvangi ma\'am)',
-        'Maths (MMP sir)',
-        'ADBMS (Nikunj sir)',
-        'OOP (Neha ma\'am)',
-        'OOP (Twinkle ma\'am)',
-      ],
-      'IT': [
-        'DCN (Parita ma\'am)',
-        'DS (Janki ma\'am)',
-        'Maths (Purvangi ma\'am)',
-        'Maths (MMP sir)',
-        'ADBMS (Nikunj sir)',
-        'OOP (Neha ma\'am)',
-        'OOP (Twinkle ma\'am)',
-      ],
-      'CE/IT': [
-        'DCN (Parita ma\'am)',
-        'DS (Janki ma\'am)',
-        'Maths (Purvangi ma\'am)',
-        'Maths (MMP sir)',
-        'ADBMS (Nikunj sir)',
-        'OOP (Neha ma\'am)',
-        'OOP (Twinkle ma\'am)',
-      ],
-      'EC': [
-        'Digital Electronics',
-        'Analog Electronics',
-        'Signal Processing',
-        'Communication Systems',
-        'Microprocessors',
-        'Control Systems',
-        'Mathematics',
-        'English',
-      ],
-      'ME': [
-        'Thermodynamics',
-        'Fluid Mechanics',
-        'Machine Design',
-        'Manufacturing Process',
-        'Heat Transfer',
-        'Material Science',
-        'Mathematics',
-        'English',
-      ],
-      'CS': [
-        'Data Structures',
-        'Algorithms',
-        'Database Systems',
-        'Software Engineering',
-        'Computer Networks',
-        'Operating Systems',
-        'Programming Languages',
-        'Mathematics',
-        'English',
-      ],
-    };
-
-    return lecturesByDept[department] ?? ['General Lecture'];
-  }
-
-  // Statistics methods
-  Future<Map<String, dynamic>> getStudentAttendanceStats(int studentId, String fromDate, String toDate) async {
-    final db = await instance.database;
-    final result = await db.rawQuery('''
-      SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN is_present = 1 THEN 1 ELSE 0 END) as present,
-        SUM(CASE WHEN is_present = 0 THEN 1 ELSE 0 END) as absent
-      FROM attendance
-      WHERE student_id = ? AND date >= ? AND date <= ?
-    ''', [studentId, fromDate, toDate]);
-
-    final data = result.first;
-    final total = (data['total'] is int) ? data['total'] as int : int.tryParse('${data['total']}') ?? 0;
-    final present = (data['present'] is int) ? data['present'] as int : int.tryParse('${data['present']}') ?? 0;
-    final absent = (data['absent'] is int) ? data['absent'] as int : int.tryParse('${data['absent']}') ?? 0;
-    final percentage = total > 0 ? (present / total) * 100 : 0.0;
-
-    return {
-      'total': total,
-      'present': present,
-      'absent': absent,
-      'percentage': percentage,
-    };
-  }
-
-  // Normalize attendance lecture field for a specific date
-  // If lecture column contains only subject (e.g., 'DCN') or is empty,
-  // try to infer lecture number from the student's time_slot and update
-  // lecture to the format 'SUBJECT - Lecture N'. Returns number of rows updated.
-  Future<int> normalizeAttendanceLectures(String date) async {
-    final db = await instance.database;
-    int updatedCount = 0;
-
-    final rows = await db.query(
-      'attendance',
-      where: 'date = ?',
-      whereArgs: [date],
-    );
-
-    for (var row in rows) {
-      final int id = row['id'] as int;
-      final String? lectureField = row['lecture'] as String?;
-      final int studentId = row['student_id'] as int;
-
-      if (lectureField == null || lectureField.trim().isEmpty) {
-        // nothing to infer
-        continue;
-      }
-
-      // If already in 'SUBJECT - Lecture N' format, skip
-      if (lectureField.contains(' - Lecture ')) continue;
-
-      // lectureField may already be subject like 'DCN' or 'DS'
-      final subject = lectureField.trim();
-
-      // Get student's time_slot
-      final studentRows = await db.query(
-        'students',
-        columns: ['time_slot'],
-        where: 'id = ?',
-        whereArgs: [studentId],
-        limit: 1,
+  // Return unique class combinations present in students table as a list of maps { 'semester': int, 'department': String, 'division': String }
+  Future<List<Map<String, dynamic>>> getClassCombinations() async {
+    final db = await database;
+    try {
+      // Query both 'classes' and 'divisions' collections to ensure compatibility
+      final result = await db.rawQuery(
+        'SELECT DISTINCT semester, department, division FROM students ORDER BY semester, department, division'
       );
 
-      String lectureSlot = '';
-      if (studentRows.isNotEmpty) {
-        lectureSlot = (studentRows.first['time_slot'] as String?) ?? '';
+      if (result.isEmpty) {
+        print('No class combinations found in the database.');
+        return [];
       }
 
-      int lectureNum = -1;
-      switch (lectureSlot) {
-        case '8:00-8:50':
-          lectureNum = 1;
-          break;
-        case '8:50-9:45':
-          lectureNum = 2;
-          break;
-        case '10:00-10:50':
-          lectureNum = 3;
-          break;
-        case '10:50-11:40':
-          lectureNum = 4;
-          break;
-        default:
-          lectureNum = -1;
-      }
+      print('Class combinations query result: $result');
 
-      // If we could infer lecture number, update the attendance row
-      if (lectureNum > 0) {
-        final newLecture = '$subject - Lecture $lectureNum';
-        final updated = await db.update(
-          'attendance',
-          {'lecture': newLecture},
-          where: 'id = ?',
-          whereArgs: [id],
-        );
-        if (updated > 0) updatedCount += updated;
-      }
+      return result.map((r) => {
+        'semester': (r['semester'] is int) ? r['semester'] as int : int.tryParse('${r['semester']}') ?? 0,
+        'department': r['department']?.toString() ?? '',
+        'division': r['division']?.toString() ?? '',
+        'class': r['division']?.toString() ?? '', // Alias 'division' as 'class' for compatibility
+      }).toList();
+    } catch (e) {
+      print('Error fetching class combinations: $e');
+      return [];
     }
-
-    return updatedCount;
   }
 
-  Future<void> close() async {
-    final db = await instance.database;
-    await db.close();
+  // Upsert a batch of students into local DB.
+  // For each student: if enrollment_number (non-empty) matches an existing row, update it.
+  // Otherwise, match by roll_number. Returns the list of students with assigned local IDs.
+  Future<List<Student>> upsertStudents(List<Student> students) async {
+    if (students.isEmpty) return [];
+    final db = await database;
+    final List<Student> result = [];
+
+    await db.transaction((txn) async {
+      for (final s in students) {
+        try {
+          final enroll = s.enrollmentNumber.trim().toUpperCase();
+          final roll = s.rollNumber.trim().toUpperCase();
+
+          // Try to find existing by enrollment_number first (when present and non-empty)
+          List<Map<String, Object?>> existing = [];
+          if (enroll.isNotEmpty) {
+            existing = await txn.query('students', where: 'enrollment_number = ?', whereArgs: [enroll], limit: 1);
+          }
+
+          // If not found by enrollment, try by roll_number
+          if (existing.isEmpty) {
+            existing = await txn.query('students', where: 'roll_number = ?', whereArgs: [roll], limit: 1);
+          }
+
+          if (existing.isNotEmpty) {
+            // Update existing
+            final row = existing.first;
+            final int id = row['id'] as int;
+            final map = s.toMap();
+            map.remove('id');
+            await txn.update('students', map, where: 'id = ?', whereArgs: [id]);
+            result.add(s.copyWith(id: id));
+          } else {
+            // Insert new
+            final map = s.toMap();
+            map.remove('id');
+            final int id = await txn.insert('students', map);
+            result.add(s.copyWith(id: id));
+          }
+        } catch (e) {
+          print('upsertStudents: failed for ${s.rollNumber} / ${s.enrollmentNumber}: $e');
+        }
+      }
+    });
+
+    return result;
   }
 
-  // Clear all data methods
-  Future<void> clearAllStudents() async {
-    final db = await instance.database;
-    await db.delete('students');
+  // ---------------------------------------------------------------------------
+  // Reporting / statistics helpers
+  // ---------------------------------------------------------------------------
+
+  /// Return aggregate attendance stats for a single student within a date range.
+  /// Result map contains: { 'total': int, 'present': int, 'absent': int, 'percentage': double }
+  Future<Map<String, dynamic>> getStudentAttendanceStats(int studentId, String fromDate, String toDate) async {
+    final db = await database;
+
+    try {
+      final result = await db.rawQuery('''
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN is_present = 1 THEN 1 ELSE 0 END) as present
+        FROM attendance
+        WHERE student_id = ? AND date >= ? AND date <= ?
+      ''', [studentId, fromDate, toDate]);
+
+      if (result.isEmpty) {
+        return { 'total': 0, 'present': 0, 'absent': 0, 'percentage': 0.0 };
+      }
+
+      final row = result.first;
+      final total = (row['total'] is int) ? row['total'] as int : int.tryParse('${row['total']}') ?? 0;
+      final present = (row['present'] is int) ? row['present'] as int : int.tryParse('${row['present']}') ?? 0;
+      final absent = total - present;
+      final percentage = total > 0 ? (present / total * 100) : 0.0;
+
+      return { 'total': total, 'present': present, 'absent': absent, 'percentage': percentage };
+    } catch (e) {
+      print('getStudentAttendanceStats error: $e');
+      return { 'total': 0, 'present': 0, 'absent': 0, 'percentage': 0.0 };
+    }
   }
 
-  Future<void> clearAllAttendance() async {
+  /// Count present students from a list of student IDs for a given date and lecture.
+  /// Returns 0 if ids list is empty. Lecture can be null or empty to ignore lecture filter.
+  Future<int> countPresentByStudentIdsAndDateAndLecture(List<int> ids, String date, String? lecture) async {
+    if (ids.isEmpty) return 0;
+    final db = await database;
+
+    try {
+      final placeholders = List.filled(ids.length, '?').join(',');
+      final args = <dynamic>[];
+      args.addAll(ids);
+      args.add(date);
+
+      String lectureCondition = '';
+      if (lecture != null && lecture.isNotEmpty) {
+        lectureCondition = ' AND lecture = ?';
+        args.add(lecture);
+      }
+
+      final sql = 'SELECT COUNT(*) as cnt FROM attendance WHERE student_id IN ($placeholders) AND date = ? AND is_present = 1$lectureCondition';
+      final result = await db.rawQuery(sql, args);
+      if (result.isEmpty) return 0;
+      final val = result.first['cnt'];
+      return (val is int) ? val : int.tryParse('$val') ?? 0;
+    } catch (e) {
+      print('countPresentByStudentIdsAndDateAndLecture error: $e');
+      return 0;
+    }
+  }
+
+  // Fetch users by role from the database
+  Future<List<Map<String, dynamic>>> getUsersByRole(String role) async {
+    final db = await database;
+    final result = await db.query(
+      'users',
+      where: 'role = ?',
+      whereArgs: [role],
+    );
+    return result;
+  }
+
+  Future<void> updateUserClasses(String email, List<String> newClasses) async {
     final db = await instance.database;
-    await db.delete('attendance');
+
+    // Convert the list of classes to a JSON string for storage
+    final classesJson = newClasses.join(',');
+
+    // Update the user's classes in the database
+    await db.update(
+      'users',
+      {'classes': classesJson},
+      where: 'email = ?',
+      whereArgs: [email],
+    );
+  }
+
+  Future<void> ensureUsersTableHasClassesColumn() async {
+    final db = await instance.database;
+
+    // Check if the 'classes' column exists in the 'users' table
+    final columnExists = await db.rawQuery(
+      "PRAGMA table_info('users')",
+    ).then((columns) => columns.any((column) => column['name'] == 'classes'));
+
+    if (!columnExists) {
+      // Add the 'classes' column if it doesn't exist
+      await db.execute("ALTER TABLE users ADD COLUMN classes TEXT");
+    }
+  }
+
+  Future<void> syncAttendanceFromFirestore() async {
+    final db = await instance.database;
+    final firestore = FirebaseFirestore.instance;
+
+    try {
+      final snapshot = await firestore.collection('attendance').get();
+      final batch = db.batch();
+
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+        final attendance = AttendanceRecord(
+          id: data['id'],
+          studentId: data['student_id'],
+          date: DateTime.parse(data['date']),
+          isPresent: data['is_present'],
+          notes: data['notes'],
+          lecture: data['lecture'],
+          timeSlot: data['time_slot'],
+        );
+
+        batch.insert('attendance', attendance.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+
+      await batch.commit();
+    } catch (e) {
+      if (kDebugMode) print('Error syncing attendance from Firestore: $e');
+    }
   }
 }

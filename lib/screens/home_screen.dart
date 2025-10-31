@@ -3,16 +3,59 @@ import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:provider/provider.dart';
-import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../providers/user_provider.dart';
 import '../providers/auth_provider.dart';
-import '../services/auth_service.dart';
+import '../providers/attendance_provider.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
+
+  // Parse class display strings like '3CE-B' or '3CE/IT-B' into tuple
+  Map<String, String>? _parseClassDisplay(String s) {
+    final re = RegExp(r'^(\d{1,2})([A-Za-z\/]+)-([A-Za-z]+)\$');
+    final m = re.firstMatch(s.trim());
+    if (m == null) return null;
+    return {'semester': m.group(1)!, 'department': m.group(2)!, 'division': m.group(3)!};
+  }
+
+  Future<Map<String,int>> _computeTodaySummary(BuildContext context) async {
+    try {
+      final userProv = Provider.of<UserProvider>(context, listen: false);
+      final attendanceProv = Provider.of<AttendanceProvider>(context, listen: false);
+      final classes = userProv.allowedClasses; // display strings like '3CE-B'
+      final date = DateTime.now().toIso8601String().substring(0,10);
+
+      int present = 0, absent = 0, late = 0;
+
+      if (classes.isEmpty) {
+        // If no classes assigned, return zeros
+        return {'present': 0, 'absent': 0, 'late': 0};
+      }
+
+      for (final cd in classes) {
+        final parsed = _parseClassDisplay(cd);
+        if (parsed == null) continue;
+        final sem = int.tryParse(parsed['semester']!);
+        final dept = parsed['department']!;
+        final div = parsed['division']!;
+        if (sem == null) continue;
+        try {
+          final stats = await attendanceProv.getAttendanceStatistics(date, sem, dept, div);
+          present += (stats['present'] as int?) ?? 0;
+          absent += (stats['absent'] as int?) ?? 0;
+          // no explicit late tracking currently; leave as 0
+        } catch (_) {
+          // ignore failures per-class and continue
+        }
+      }
+
+      return {'present': present, 'absent': absent, 'late': late};
+    } catch (e) {
+      return {'present': 0, 'absent': 0, 'late': 0};
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -26,8 +69,6 @@ class HomeScreen extends StatelessWidget {
     final displayName = userProvider.user?.name ?? authEmail ?? 'User';
     final isAdmin = userProvider.isAdmin;
     final isCC = role == 'CC';
-    final canInvite = isAdmin || isCC || role == 'HOD';
-    final canManageStudents = isAdmin || isCC;
     final hasClasses = userProvider.allowedClasses.isNotEmpty;
 
     return Scaffold(
@@ -37,16 +78,6 @@ class HomeScreen extends StatelessWidget {
         elevation: 0,
         actions: [
           if (kDebugMode) ...[
-            IconButton(
-              tooltip: 'Debug Sign-in',
-              icon: const Icon(Icons.login_outlined),
-              onPressed: () => context.go('/debug-signin'),
-            ),
-            IconButton(
-              tooltip: 'Pending Profiles',
-              icon: const Icon(Icons.sync_problem),
-              onPressed: () => _showPendingProfilesDialog(context),
-            ),
             IconButton(
               tooltip: 'Check Profile',
               icon: const Icon(Icons.person_search),
@@ -61,66 +92,105 @@ class HomeScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Redesigned the section displaying the user's name, image, and role
               Row(
                 children: [
-                  _buildLogoAvatar(context),
-                  const SizedBox(width: 12),
+                  CircleAvatar(
+                    radius: 36,
+                    backgroundColor: Theme.of(context).colorScheme.primary.withAlpha(50),
+                    child: CircleAvatar(
+                      radius: 32,
+                      backgroundImage: AssetImage('assets/fox.png'), // Replace with actual user image if available
+                    ),
+                  ),
+                  const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Welcome back,', style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7))),
+                        Text(
+                          displayName,
+                          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                         const SizedBox(height: 4),
-                        Text(displayName, style: Theme.of(context).textTheme.titleLarge),
-                        const SizedBox(height: 2),
-                        if (role != null) Text('Role: $role', style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6), fontSize: 12)),
-                        if (!hasClasses && !isAdmin) Text('No classes assigned', style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12)),
+                        if (role != null)
+                          Text(
+                            'Role: $role',
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
                       ],
                     ),
                   ),
-                  IconButton(onPressed: () {}, icon: Icon(Icons.notifications_outlined)),
                 ],
               ),
               const SizedBox(height: 20),
 
-              // Summary boxes
-              Row(
-                children: [
-                  Expanded(child: _buildSummaryBox(context, 'Present', '95%', Theme.of(context).colorScheme.primary.withAlpha(0x15), Theme.of(context).colorScheme.primary)),
-                  const SizedBox(width: 12),
-                  Expanded(child: _buildSummaryBox(context, 'Absent', '3', Theme.of(context).colorScheme.error.withAlpha(0x12), Theme.of(context).colorScheme.error)),
-                  const SizedBox(width: 12),
-                  Expanded(child: _buildSummaryBox(context, 'Late', '2', Theme.of(context).colorScheme.tertiary.withAlpha(0x12), Theme.of(context).colorScheme.tertiary)),
-                ],
+              // Today's summary
+              Text('Today\'s Summary', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 12),
+              FutureBuilder<Map<String,int>>(
+                future: _computeTodaySummary(context),
+                builder: (context, snap) {
+                  if (snap.connectionState == ConnectionState.waiting) {
+                    // lightweight loading placeholders
+                    return Row(
+                      children: [
+                        Expanded(child: _buildSummaryBox(context, 'Present', '—', Theme.of(context).colorScheme.primary.withAlpha(0x15), Theme.of(context).colorScheme.primary)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildSummaryBox(context, 'Absent', '—', Theme.of(context).colorScheme.error.withAlpha(0x12), Theme.of(context).colorScheme.error)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildSummaryBox(context, 'Late', '—', Theme.of(context).colorScheme.tertiary.withAlpha(0x12), Theme.of(context).colorScheme.tertiary)),
+                      ],
+                    );
+                  }
+                  final data = snap.data ?? {'present':0,'absent':0,'late':0};
+                  return Row(
+                    children: [
+                      Expanded(child: _buildSummaryBox(context, 'Present', '${data['present']}', Theme.of(context).colorScheme.primary.withAlpha(0x15), Theme.of(context).colorScheme.primary)),
+                      const SizedBox(width: 12),
+                      Expanded(child: _buildSummaryBox(context, 'Absent', '${data['absent']}', Theme.of(context).colorScheme.error.withAlpha(0x12), Theme.of(context).colorScheme.error)),
+                      const SizedBox(width: 12),
+                      Expanded(child: _buildSummaryBox(context, 'Late', '${data['late']}', Theme.of(context).colorScheme.tertiary.withAlpha(0x12), Theme.of(context).colorScheme.tertiary)),
+                    ],
+                  );
+                },
               ),
 
               const SizedBox(height: 20),
               Text('Quick Actions', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 12),
 
-              // Quick action grid
-              GridView.count(
-                shrinkWrap: true,
-                crossAxisCount: 2,
-                crossAxisSpacing: 12,
-                mainAxisSpacing: 12,
-                childAspectRatio: 1.6,
-                physics: const NeverScrollableScrollPhysics(),
-                children: [
-                  _buildQuickAction(
+              // Quick action grid (responsive wrap to avoid uneven spacing when number of actions is odd)
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final tileWidth = (constraints.maxWidth - 12) / 2;
+                  final List<Widget> actions = [];
+
+                  void addAction(Widget w) => actions.add(SizedBox(width: tileWidth, child: w));
+
+                  addAction(_buildQuickAction(
                     context,
                     'Take Attendance',
                     Icons.checklist,
                     hasClasses || isAdmin ? () => context.go('/attendance') : () => ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You have no classes assigned'))),
                     color: Theme.of(context).colorScheme.primary,
-                  ),
-                  _buildQuickAction(context, 'View Reports', Icons.bar_chart, () => context.go('/reports')),
-                  if (canManageStudents) _buildQuickAction(context, 'Manage Students', Icons.people, () => context.go('/students')),
-                  if (canInvite) _buildQuickAction(context, 'Create Invite', Icons.person_add, () => context.go('/create-invite')),
-                  if (role == 'HOD') _buildQuickAction(context, 'Manage CCs', Icons.manage_accounts, () => context.go('/manage-ccs')),
-                  if (role == 'HOD' || role == 'CC') _buildQuickAction(context, 'Manage CRs', Icons.how_to_reg, () => context.go('/manage-crs')),
-                  _buildQuickAction(context, 'Settings', Icons.settings, () => context.go('/settings')),
-                ],
+                  ));
+                  addAction(_buildQuickAction(context, 'View Reports', Icons.bar_chart, () => context.go('/reports')));
+                  if (isAdmin || isCC) addAction(_buildQuickAction(context, 'Manage Students', Icons.people, () => context.go('/students')));
+                  if (role == 'HOD') addAction(_buildQuickAction(context, 'Manage CCs', Icons.manage_accounts, () => context.go('/manage-ccs')));
+                  if (role == 'HOD' || role == 'CC') addAction(_buildQuickAction(context, 'Manage CRs', Icons.how_to_reg, () => context.go('/manage-crs')));
+                  addAction(_buildQuickAction(context, 'Settings', Icons.settings, () => context.go('/settings')));
+
+                  return Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: actions,
+                  );
+                },
               ),
 
               const SizedBox(height: 16),
@@ -132,45 +202,20 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  // Attempts to load `assets/fox.png` from the asset bundle. If the asset
-  // is missing or fails to load, falls back to the default avatar icon.
-  Widget _buildLogoAvatar(BuildContext context) {
-    return FutureBuilder<ByteData>(
-      future: rootBundle.load('assets/fox.png'),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
-          final bytes = snapshot.data!.buffer.asUint8List();
-          return CircleAvatar(
-            radius: 28,
-            backgroundImage: MemoryImage(bytes),
-            backgroundColor: Colors.transparent,
-          );
-        }
-
-        // Fallback avatar while loading or if asset not found
-        return CircleAvatar(
-          radius: 28,
-          backgroundColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.15),
-          child: Icon(Icons.person, color: Theme.of(context).colorScheme.primary),
-        );
-      },
-    );
-  }
-
   Widget _buildSummaryBox(BuildContext context, String label, String value, Color bg, Color accent) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(12),
-        boxShadow: [BoxShadow(color: Theme.of(context).colorScheme.shadow.withAlpha(0x20), blurRadius: 8, offset: const Offset(0,2))],
+        boxShadow: [BoxShadow(color: Theme.of(context).colorScheme.shadow.withAlpha(0x14), blurRadius: 6, offset: const Offset(0,1))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(label.toUpperCase(), style: TextStyle(color: accent.withValues(alpha: 0.9), fontWeight: FontWeight.w600)),
-          const SizedBox(height: 8),
-          Text(value, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: accent)),
+          const SizedBox(height: 6),
+          Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: accent)),
         ],
       ),
     );
@@ -180,12 +225,12 @@ class HomeScreen extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      elevation: 4,
+      elevation: 2,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(14),
         child: Padding(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           child: Row(
             children: [
               Container(
@@ -207,78 +252,6 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Future<void> _showPendingProfilesDialog(BuildContext context) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final keys = prefs.getKeys().where((k) => k.startsWith('pending_profile_')).toList();
-      if (keys.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No pending profiles')));
-        return;
-      }
-
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) {
-          return AlertDialog(
-            title: const Text('Pending Profiles'),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: keys.length,
-                itemBuilder: (c, i) {
-                  final k = keys[i];
-                  final uid = k.replaceFirst('pending_profile_', '');
-                  final raw = prefs.getString(k) ?? '';
-                  String pretty;
-                  try {
-                    final obj = jsonDecode(raw);
-                    pretty = const JsonEncoder.withIndent('  ').convert(obj);
-                  } catch (_) {
-                    pretty = raw;
-                  }
-                  return Card(
-                    child: ListTile(
-                      title: Text(uid),
-                      subtitle: Text(pretty, maxLines: 6, overflow: TextOverflow.ellipsis),
-                      isThreeLine: true,
-                      trailing: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: 'Retry',
-                            icon: const Icon(Icons.refresh),
-                            onPressed: () async {
-                              Navigator.of(ctx).pop();
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Retrying pending profiles...')));
-                              await AuthService.instance.retryPendingProfiles();
-                            },
-                          ),
-                          IconButton(
-                            tooltip: 'Delete',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () async {
-                              await prefs.remove(k);
-                              Navigator.of(ctx).pop();
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Removed pending profile')));
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close'))],
-          );
-        },
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error reading pending profiles: $e')));
-    }
-  }
-
   Future<void> _checkMyProfile(BuildContext context) async {
     final uid = AuthProvider.instance.uid;
     if (uid == null) {
@@ -292,7 +265,60 @@ class HomeScreen extends StatelessWidget {
         return;
       }
       final data = snap.data();
-      await showDialog<void>(context: context, builder: (ctx) => AlertDialog(title: const Text('Firestore profile'), content: SingleChildScrollView(child: Text(data.toString())), actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close'))]));
+      // Enhanced Firestore profile viewing dialog
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.person, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 8),
+              const Text('Firestore Profile'),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: data != null
+                  ? data.entries.map<Widget>((entry) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${entry.key}: ',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Theme.of(context).colorScheme.secondary,
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            '${entry.value}',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )).toList()
+                  : [
+                    Text(
+                      'No data available',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error reading profile: $e')));
     }

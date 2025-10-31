@@ -10,7 +10,7 @@ void main() {
         semester: 3,
         department: 'CS',
         division: 'A',
-        timeSlot: '8:00-8:50',
+        timeSlot: '8:00-8:50', enrollmentNumber: '',
       );
 
       expect(student.name, 'John Doe');
@@ -28,7 +28,7 @@ void main() {
           semester: 9, // Invalid semester
           department: 'CS',
           division: 'A',
-          timeSlot: '8:00-8:50',
+          timeSlot: '8:00-8:50', enrollmentNumber: '',
         ),
         throwsA(isA<ArgumentError>()),
       );
@@ -42,7 +42,7 @@ void main() {
           semester: 3,
           department: 'CS',
           division: 'A',
-          timeSlot: '8:00-8:50',
+          timeSlot: '8:00-8:50', enrollmentNumber: '',
         ),
         throwsA(isA<ArgumentError>()),
       );
@@ -56,7 +56,7 @@ void main() {
           semester: 3,
           department: 'CS',
           division: 'A',
-          timeSlot: '8:00-8:50',
+          timeSlot: '8:00-8:50', enrollmentNumber: '',
         ),
         throwsA(isA<ArgumentError>()),
       );
@@ -70,7 +70,7 @@ void main() {
         semester: 3,
         department: 'CS',
         division: 'A',
-        timeSlot: '8:00-8:50',
+        timeSlot: '8:00-8:50', enrollmentNumber: '',
       );
 
       final map = student.toMap();
@@ -91,7 +91,7 @@ void main() {
         semester: 3,
         department: '  cs  ',
         division: '  a  ',
-        timeSlot: '8:00-8:50',
+        timeSlot: '8:00-8:50', enrollmentNumber: '',
       );
 
       final map = student.toMap();

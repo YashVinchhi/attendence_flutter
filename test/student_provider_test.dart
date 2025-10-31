@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:myapp/providers/student_provider.dart';
 import 'package:myapp/services/database_helper.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -8,6 +9,7 @@ void main() {
     setUpAll(() async {
       // Initialize ffi implementation for sqflite in Dart VM tests
       sqfliteFfiInit();
+      DatabaseFactory? databaseFactoryFfi;
       databaseFactory = databaseFactoryFfi;
     });
 
@@ -82,4 +84,7 @@ Bad Sem,CE-B:20,9,CE,B
       expect(found.length, 0);
     });
   });
+}
+
+void sqfliteFfiInit() {
 }

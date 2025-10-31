@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 import '../models/models.dart';
 import '../providers/student_provider.dart';
 import '../services/database_helper.dart';
 import '../services/navigation_service.dart';
+import '../providers/user_provider.dart';
 
 class StudentsScreen extends StatefulWidget {
   const StudentsScreen({super.key});
@@ -29,6 +31,10 @@ class _StudentsScreenState extends State<StudentsScreen> {
   String _sortBy = 'roll'; // 'roll' | 'name'
   bool _isAddingStudent = false;
   Student? _editingStudent; // currently editing student reference
+  bool _hasAppliedRestrictedDefaults = false;
+  VoidCallback? _userListener;
+  String _lastAllowedClassesHash = '';
+  bool _showDebugPanel = false;
 
   final String _defaultTimeSlot = '8:00-8:50';
 
@@ -37,11 +43,55 @@ class _StudentsScreenState extends State<StudentsScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Provider.of<StudentProvider>(context, listen: false).fetchStudents();
+      // Apply restricted user defaults if needed
+      final userProv = Provider.of<UserProvider>(context, listen: false);
+      if ((userProv.isCc || userProv.isCr) && !_hasAppliedRestrictedDefaults) {
+        final allowed = userProv.user?.allowedClasses ?? [];
+        if (allowed.isNotEmpty) {
+          final first = allowed.first;
+          setState(() {
+            _selectedSemester = first.semester;
+            _selectedDepartment = first.department;
+            _selectedDivision = first.division;
+            _hasAppliedRestrictedDefaults = true;
+          });
+        }
+      }
+      // Attach listener to UserProvider so when allowedClasses arrive from Firestore on first-run, we refetch students
+      try {
+        final up = Provider.of<UserProvider>(context, listen: false);
+        _userListener = () {
+          final allowed = up.allowedClasses.join('|');
+          if (allowed != _lastAllowedClassesHash) {
+            _lastAllowedClassesHash = allowed;
+            // Re-fetch students to pick up Firestore-permitted fetch
+            Provider.of<StudentProvider>(context, listen: false).fetchStudents();
+            // Re-apply restricted defaults in UI
+            if ((up.isCc || up.isCr) && !_hasAppliedRestrictedDefaults) {
+              final allowedObjs = up.user?.allowedClasses ?? [];
+              if (allowedObjs.isNotEmpty) {
+                final first = allowedObjs.first;
+                setState(() {
+                  _selectedSemester = first.semester;
+                  _selectedDepartment = first.department;
+                  _selectedDivision = first.division;
+                  _hasAppliedRestrictedDefaults = true;
+                });
+              }
+            }
+          }
+        };
+        up.addListener(_userListener!);
+      } catch (_) {}
     });
   }
 
   @override
   void dispose() {
+    try {
+      final up = Provider.of<UserProvider>(context, listen: false);
+      if (_userListener != null) up.removeListener(_userListener!);
+    } catch (_) {}
     _nameController.dispose();
     _rollNumberController.dispose();
     _searchController.dispose();
@@ -91,16 +141,17 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         border: OutlineInputBorder(),
                       ),
                       initialValue: _selectedSemester,
-                      items: DatabaseHelper.instance.getSemesters()
-                          .map((sem) => DropdownMenuItem(
-                                value: sem,
-                                child: Text('Semester $sem'),
-                              ))
-                          .toList(),
+                      items: (() {
+                        final userProv = Provider.of<UserProvider>(context, listen: false);
+                        if (userProv.isCc || userProv.isCr) {
+                          final allowed = userProv.user?.allowedClasses ?? [];
+                          final semesters = allowed.map((c) => c.semester).toSet().toList()..sort();
+                          return semesters.map((sem) => DropdownMenuItem(value: sem, child: Text('Semester $sem'))).toList();
+                        }
+                        return DatabaseHelper.instance.getSemesters().map((sem) => DropdownMenuItem(value: sem, child: Text('Semester $sem'))).toList();
+                      })(),
                       onChanged: (value) {
-                        setDialogState(() {
-                          _selectedSemester = value!;
-                        });
+                        setDialogState(() { _selectedSemester = value!; });
                       },
                     ),
                     const SizedBox(height: 16),
@@ -110,16 +161,17 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         border: OutlineInputBorder(),
                       ),
                       initialValue: _selectedDepartment,
-                      items: DatabaseHelper.instance.getIndividualDepartments()
-                          .map((dept) => DropdownMenuItem(
-                                value: dept,
-                                child: Text(dept),
-                              ))
-                          .toList(),
+                      items: (() {
+                        final userProv = Provider.of<UserProvider>(context, listen: false);
+                        if (userProv.isCc || userProv.isCr) {
+                          final allowed = userProv.user?.allowedClasses ?? [];
+                          final deps = allowed.where((c) => c.semester == _selectedSemester).map((c) => c.department).toSet().toList()..sort();
+                          return deps.map((d) => DropdownMenuItem(value: d, child: Text(d))).toList();
+                        }
+                        return DatabaseHelper.instance.getIndividualDepartments().map((dept) => DropdownMenuItem(value: dept, child: Text(dept))).toList();
+                      })(),
                       onChanged: (value) {
-                        setDialogState(() {
-                          _selectedDepartment = value!;
-                        });
+                        setDialogState(() { _selectedDepartment = value!; });
                       },
                     ),
                     const SizedBox(height: 16),
@@ -129,16 +181,17 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         border: OutlineInputBorder(),
                       ),
                       initialValue: _selectedDivision,
-                      items: DatabaseHelper.instance.getDivisions()
-                          .map((div) => DropdownMenuItem(
-                                value: div,
-                                child: Text('Division $div'),
-                              ))
-                          .toList(),
+                      items: (() {
+                        final userProv = Provider.of<UserProvider>(context, listen: false);
+                        if (userProv.isCc || userProv.isCr) {
+                          final allowed = userProv.user?.allowedClasses ?? [];
+                          final divs = allowed.where((c) => c.semester == _selectedSemester && c.department == _selectedDepartment).map((c) => c.division).toSet().toList()..sort();
+                          return divs.map((d) => DropdownMenuItem(value: d, child: Text('Division $d'))).toList();
+                        }
+                        return DatabaseHelper.instance.getDivisions().map((div) => DropdownMenuItem(value: div, child: Text('Division $div'))).toList();
+                      })(),
                       onChanged: (value) {
-                        setDialogState(() {
-                          _selectedDivision = value!;
-                        });
+                        setDialogState(() { _selectedDivision = value!; });
                       },
                     ),
                   ],
@@ -188,6 +241,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
         department: _selectedDepartment,
         division: _selectedDivision,
         timeSlot: _defaultTimeSlot,
+        enrollmentNumber: '', // Placeholder for enrollmentNumber
       );
 
       final studentProvider = Provider.of<StudentProvider>(context, listen: false);
@@ -273,17 +327,16 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         border: OutlineInputBorder(),
                       ),
                       initialValue: _selectedSemester,
-                      items: DatabaseHelper.instance.getSemesters()
-                          .map((sem) => DropdownMenuItem(
-                                value: sem,
-                                child: Text('Semester $sem'),
-                              ))
-                          .toList(),
-                      onChanged: (value) {
-                        setDialogState(() {
-                          _selectedSemester = value!;
-                        });
-                      },
+                      items: (() {
+                        final userProv = Provider.of<UserProvider>(context, listen: false);
+                        if (userProv.isCc || userProv.isCr) {
+                          final allowed = userProv.user?.allowedClasses ?? [];
+                          final semesters = allowed.map((c) => c.semester).toSet().toList()..sort();
+                          return semesters.map((sem) => DropdownMenuItem(value: sem, child: Text('Semester $sem'))).toList();
+                        }
+                        return DatabaseHelper.instance.getSemesters().map((sem) => DropdownMenuItem(value: sem, child: Text('Semester $sem'))).toList();
+                      })(),
+                      onChanged: (value) { setDialogState(() { _selectedSemester = value!; }); },
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
@@ -292,17 +345,16 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         border: OutlineInputBorder(),
                       ),
                       initialValue: _selectedDepartment,
-                      items: DatabaseHelper.instance.getIndividualDepartments()
-                          .map((dept) => DropdownMenuItem(
-                                value: dept,
-                                child: Text(dept),
-                              ))
-                          .toList(),
-                      onChanged: (value) {
-                        setDialogState(() {
-                          _selectedDepartment = value!;
-                        });
-                      },
+                      items: (() {
+                        final userProv = Provider.of<UserProvider>(context, listen: false);
+                        if (userProv.isCc || userProv.isCr) {
+                          final allowed = userProv.user?.allowedClasses ?? [];
+                          final deps = allowed.where((c) => c.semester == _selectedSemester).map((c) => c.department).toSet().toList()..sort();
+                          return deps.map((d) => DropdownMenuItem(value: d, child: Text(d))).toList();
+                        }
+                        return DatabaseHelper.instance.getIndividualDepartments().map((dept) => DropdownMenuItem(value: dept, child: Text(dept))).toList();
+                      })(),
+                      onChanged: (value) { setDialogState(() { _selectedDepartment = value!; }); },
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
@@ -311,17 +363,16 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         border: OutlineInputBorder(),
                       ),
                       initialValue: _selectedDivision,
-                      items: DatabaseHelper.instance.getDivisions()
-                          .map((div) => DropdownMenuItem(
-                                value: div,
-                                child: Text('Division $div'),
-                              ))
-                          .toList(),
-                      onChanged: (value) {
-                        setDialogState(() {
-                          _selectedDivision = value!;
-                        });
-                      },
+                      items: (() {
+                        final userProv = Provider.of<UserProvider>(context, listen: false);
+                        if (userProv.isCc || userProv.isCr) {
+                          final allowed = userProv.user?.allowedClasses ?? [];
+                          final divs = allowed.where((c) => c.semester == _selectedSemester && c.department == _selectedDepartment).map((c) => c.division).toSet().toList()..sort();
+                          return divs.map((d) => DropdownMenuItem(value: d, child: Text('Division $d'))).toList();
+                        }
+                        return DatabaseHelper.instance.getDivisions().map((div) => DropdownMenuItem(value: div, child: Text('Division $div'))).toList();
+                      })(),
+                      onChanged: (value) { setDialogState(() { _selectedDivision = value!; }); },
                     ),
                   ],
                 ),
@@ -374,6 +425,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
         division: _selectedDivision,
         timeSlot: _editingStudent!.timeSlot,
         createdAt: _editingStudent!.createdAt,
+        enrollmentNumber: _editingStudent!.enrollmentNumber, // Added enrollmentNumber
       );
 
       final studentProvider = Provider.of<StudentProvider>(context, listen: false);
@@ -451,6 +503,11 @@ class _StudentsScreenState extends State<StudentsScreen> {
 
   List<Student> _getFilteredStudents(List<Student> students) {
     List<Student> list = students;
+    final userProv = Provider.of<UserProvider>(context, listen: false);
+    if (userProv.isCc || userProv.isCr) {
+      final allowed = userProv.user?.allowedClasses ?? [];
+      list = list.where((s) => allowed.any((c) => c.semester == s.semester && c.department.toUpperCase() == s.department.toUpperCase() && c.division.toUpperCase() == s.division.toUpperCase())).toList();
+    }
 
     if (_searchQuery.isNotEmpty) {
       list = list.where((student) {
@@ -569,7 +626,10 @@ class _StudentsScreenState extends State<StudentsScreen> {
                   'Roll, Name  (e.g., CE-B:01, JOHN DOE)\n'
                   'Example:\n'
                   'CE-B:01, KANJARIYA VAISHALIBEN BHIKHABHAI\n'
-                  'IT-B:02, DUDHAIYA RACHIT VIPULBHAI',
+                  'IT-B:02, DUDHAIYA RACHIT VIPULBHAI\n\n'
+                  'Format C (CEIT-A template - recommended):\n'
+                  'Enrollment_Number,Full_Name,Roll_Number,Branch,Sem,Division,Role\n'
+                  'Example header (this is the default template the app will accept):',
                   style: TextStyle(fontFamily: 'monospace', fontSize: 12),
                 ),
               ),
@@ -583,6 +643,20 @@ class _StudentsScreenState extends State<StudentsScreen> {
             ],
           ),
           actions: [
+            // Quick import using built-in CEIT-A sample template (from assets)
+            TextButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await Future.delayed(const Duration(milliseconds: 100));
+                try {
+                  final csv = await rootBundle.loadString('assets/sample_data/CEIT-A.csv');
+                  if (context.mounted) _performCsvImport(csv);
+                } catch (e) {
+                  if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load default template: $e')));
+                }
+              },
+              child: const Text('Use Default CEIT-A Template'),
+            ),
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
               child: const Text('Cancel'),
@@ -665,6 +739,8 @@ class _StudentsScreenState extends State<StudentsScreen> {
     final int imported = result['imported'] ?? 0;
     final int total = result['total'] ?? 0;
     final List<String> errors = List<String>.from(result['errors'] ?? []);
+    final String? ccName = (result['cc_name'] != null) ? result['cc_name'].toString() : null;
+    final String? ccEmail = (result['cc_email'] != null) ? result['cc_email'].toString() : null;
 
     showDialog(
       context: context,
@@ -678,6 +754,37 @@ class _StudentsScreenState extends State<StudentsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('Successfully imported: $imported out of $total students'),
+                if (ccName != null || ccEmail != null) ...[
+                  const SizedBox(height: 12),
+                  Card(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (ccName != null) Text('CC: $ccName', style: const TextStyle(fontWeight: FontWeight.w600)),
+                                if (ccEmail != null) Text(ccEmail, style: const TextStyle(fontSize: 12)),
+                              ],
+                            ),
+                          ),
+                          if (ccEmail != null)
+                            IconButton(
+                              tooltip: 'Copy CC email',
+                              icon: const Icon(Icons.copy, size: 18),
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(text: ccEmail));
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied CC email to clipboard')));
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
                 if (errors.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   Text('Errors:', style: TextStyle(fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.onSurface)),
@@ -797,42 +904,51 @@ class _StudentsScreenState extends State<StudentsScreen> {
           onPressed: () => context.go('/home'),
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: _showAddStudentDialog,
-            tooltip: 'Add Student',
+          PopupMenuButton<String>(
+            onSelected: (value) async {
+              if (value == 'reset') await _resetSampleData();
+              if (value == 'debug') setState(() => _showDebugPanel = !_showDebugPanel);
+            },
+            itemBuilder: (ctx) => [
+              const PopupMenuItem(value: 'reset', child: Text('Reset sample data')),
+              PopupMenuItem(value: 'debug', child: Text(_showDebugPanel ? 'Hide Debug' : 'Show Debug')),
+            ],
           ),
-          IconButton(
-            icon: const Icon(Icons.upload_file),
-            onPressed: _importFromCsv,
-            tooltip: 'Import Students from CSV',
-          ),
-          IconButton(
-            icon: const Icon(Icons.more_vert),
-            tooltip: 'More',
-            onPressed: () async {
-              final choice = await showDialog<String>(
-                context: context,
-                builder: (ctx) => SimpleDialog(
-                  title: const Text('Options'),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          showModalBottomSheet(
+            context: context,
+            builder: (context) {
+              return SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    SimpleDialogOption(
-                      onPressed: () => Navigator.pop(ctx, 'reset'),
-                      child: const Text('Reset sample data'),
+                    ListTile(
+                      leading: const Icon(Icons.person_add),
+                      title: const Text('Add Student'),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        _showAddStudentDialog();
+                      },
                     ),
-                    SimpleDialogOption(
-                      onPressed: () => Navigator.pop(ctx, null),
-                      child: const Text('Cancel'),
+                    ListTile(
+                      leading: const Icon(Icons.upload_file),
+                      title: const Text('Import Students from CSV'),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        _importFromCsv();
+                      },
                     ),
                   ],
                 ),
               );
-              if (choice == 'reset') {
-                await _resetSampleData();
-              }
             },
-          ),
-        ],
+          );
+        },
+        tooltip: 'Add / Import',
+        child: const Icon(Icons.add),
       ),
       body: Consumer<StudentProvider>(
         builder: (context, studentProvider, child) {
@@ -849,30 +965,53 @@ class _StudentsScreenState extends State<StudentsScreen> {
                 Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      TextField(
-                        controller: _searchController,
-                        decoration: InputDecoration(
-                          hintText: 'Search students by name or roll...',
-                          prefixIcon: const Icon(Icons.search),
-                          border: const OutlineInputBorder(),
-                          suffixIcon: _searchController.text.isEmpty
-                              ? null
-                              : IconButton(
-                                  icon: const Icon(Icons.clear),
-                                  tooltip: 'Clear',
-                                  onPressed: () {
-                                    _searchController.clear();
-                                    setState(() => _searchQuery = '');
-                                  },
-                                ),
+                      if (_showDebugPanel)
+                        Card(
+                          color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+                          margin: const EdgeInsets.only(bottom: 12),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12.0),
+                            child: Consumer2<UserProvider, StudentProvider>(
+                              builder: (context, up, sp, child) {
+                                final allowed = up.allowedClasses;
+                                final err = sp.errorMessage;
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text('Debug: User allowed classes: ${allowed.isEmpty ? '<none>' : allowed.join(', ')}', style: const TextStyle(fontSize: 12)),
+                                    const SizedBox(height: 6),
+                                    Text('Last student provider error: ${err ?? '<none>'}', style: const TextStyle(fontSize: 12, color: Colors.red)),
+                                  ],
+                                );
+                              },
+                            ),
+                          ),
                         ),
-                        onChanged: (value) {
-                          setState(() {
-                            _searchQuery = value;
-                          });
-                        },
-                      ),
+                     TextField(
+                       controller: _searchController,
+                       decoration: InputDecoration(
+                         hintText: 'Search students by name or roll...',
+                         prefixIcon: const Icon(Icons.search),
+                         border: const OutlineInputBorder(),
+                         suffixIcon: _searchController.text.isEmpty
+                             ? null
+                             : IconButton(
+                                 icon: const Icon(Icons.clear),
+                                 tooltip: 'Clear',
+                                 onPressed: () {
+                                   _searchController.clear();
+                                   setState(() => _searchQuery = '');
+                                 },
+                               ),
+                       ),
+                       onChanged: (value) {
+                         setState(() {
+                           _searchQuery = value;
+                         });
+                       },
+                     ),
                       const SizedBox(height: 8),
                       Align(
                         alignment: Alignment.centerLeft,
@@ -916,6 +1055,19 @@ class _StudentsScreenState extends State<StudentsScreen> {
                             onPressed: _importFromCsv,
                           ),
                         ],
+                      ),
+                      const SizedBox(height: 12),
+                      // Show time slot once at top to avoid repetition in each student card
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text('Time Slot: $_defaultTimeSlot', style: Theme.of(context).textTheme.bodySmall),
+                        ),
                       ),
                     ],
                   ),
@@ -981,7 +1133,6 @@ class _StudentsScreenState extends State<StudentsScreen> {
                               Text(
                                 'Sem ${student.semester} • ${student.department} • Div ${student.division}',
                               ),
-                              Text('Time Slot: ${student.timeSlot}'),
                             ],
                           ),
                           trailing: Row(
@@ -1007,63 +1158,30 @@ class _StudentsScreenState extends State<StudentsScreen> {
           );
         },
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _showAddStudentDialog,
-        child: const Icon(Icons.add),
-      ),
     );
   }
 }
 
-class _Shimmer extends StatefulWidget {
-  final Widget child;
+class _Shimmer extends StatelessWidget {
   final Color baseColor;
   final Color highlightColor;
-  const _Shimmer({required this.child, required this.baseColor, required this.highlightColor});
+  final Widget child;
 
-  @override
-  State<_Shimmer> createState() => _ShimmerState();
-}
-
-class _ShimmerState extends State<_Shimmer> with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500))
-      ..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+  const _Shimmer({
+    required this.baseColor,
+    required this.highlightColor,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      child: widget.child,
-      builder: (context, child) {
-        final v = _controller.value; // 0..1
-        final gradient = LinearGradient(
-          begin: Alignment(-1.0 + 2.0 * v, 0.0),
-          end: Alignment(1.0 + 2.0 * v, 0.0),
-          colors: [
-            widget.baseColor,
-            widget.highlightColor,
-            widget.baseColor,
-          ],
-          stops: const [0.35, 0.5, 0.65],
-        );
-        return ShaderMask(
-          shaderCallback: (rect) => gradient.createShader(rect),
-          blendMode: BlendMode.srcATop,
-          child: child,
-        );
-      },
+    return Container(
+      decoration: BoxDecoration(
+        color: baseColor,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: child,
     );
   }
 }
+

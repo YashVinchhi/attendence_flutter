@@ -326,14 +326,22 @@ class MyApp extends StatelessWidget {
         builder: (context, themeProvider, child) {
           final themeMode = themeProvider.themeMode;
 
-          return MaterialApp.router(
-            title: 'Attendance Management System',
-            theme: _buildLightTheme(),
-            darkTheme: _buildDarkTheme(),
-            themeMode: themeMode,
-            routerConfig: routerConfig,
-            debugShowCheckedModeBanner: false,
-            restorationScopeId: 'app',
+          return PopScope(
+            onPopInvokedWithResult: (bool isHandled, dynamic result) {
+              final canPop = routerConfig.routerDelegate.navigatorKey.currentState?.canPop() ?? false;
+              if (canPop) {
+                routerConfig.routerDelegate.navigatorKey.currentState?.pop(result);
+              }
+            },
+            child: MaterialApp.router(
+              title: 'Attendance Management System',
+              theme: _buildLightTheme(),
+              darkTheme: _buildDarkTheme(),
+              themeMode: themeMode,
+              routerConfig: routerConfig,
+              debugShowCheckedModeBanner: false,
+              restorationScopeId: 'app',
+            ),
           );
         },
       ),

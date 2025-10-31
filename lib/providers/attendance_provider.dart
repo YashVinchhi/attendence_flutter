@@ -47,12 +47,24 @@ class AttendanceProvider with ChangeNotifier {
     }
   }
 
+  Future<void> syncAttendanceFromFirestore() async {
+    try {
+      _setState(AttendanceProviderState.loading);
+      await DatabaseHelper.instance.syncAttendanceFromFirestore();
+      _setState(AttendanceProviderState.idle);
+    } catch (e) {
+      if (kDebugMode) print('Error syncing attendance from Firestore: $e');
+      _setState(AttendanceProviderState.error, error: 'Failed to sync attendance from Firestore');
+    }
+  }
+
   Future<void> fetchAttendanceByDate(String date) async {
     if (_state == AttendanceProviderState.loading) return;
     try { DateTime.parse(date); } catch (_) { _setState(AttendanceProviderState.error, error: 'Invalid date format'); return; }
 
     _setState(AttendanceProviderState.loading);
     try {
+      await syncAttendanceFromFirestore(); // Ensure Firestore data is synced
       _attendanceRecords = await DatabaseHelper.instance.getAttendanceByDate(date);
       _setState(AttendanceProviderState.idle);
     } catch (e) {
@@ -67,6 +79,7 @@ class AttendanceProvider with ChangeNotifier {
 
     _setState(AttendanceProviderState.loading);
     try {
+      await syncAttendanceFromFirestore(); // Ensure Firestore data is synced
       _attendanceRecords = await DatabaseHelper.instance.getAttendanceByDateAndLecture(date, lecture, timeSlot: timeSlot);
       _setState(AttendanceProviderState.idle);
     } catch (e) {

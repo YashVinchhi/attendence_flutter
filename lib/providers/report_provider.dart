@@ -270,6 +270,7 @@ class ReportProvider with ChangeNotifier {
 
       // Attempt to share the file. If file sharing fails, fallback to sharing raw text.
       try {
+        // ignore: deprecated_member_use
         await Share.shareXFiles(
           [XFile(file.path)],
           text: 'Attendance Report - $_fromDate to $_toDate',
@@ -278,6 +279,7 @@ class ReportProvider with ChangeNotifier {
       } catch (shareErr) {
         // Fallback: share as plain text (CSV content) if file share isn't supported
         try {
+          // ignore: deprecated_member_use
           await Share.share(content, subject: 'Attendance Report - $_fromDate to $_toDate');
         } catch (textShareErr) {
           _setState(ReportProviderState.error, error: 'Failed to share file: ${textShareErr.toString()}');
@@ -381,7 +383,7 @@ class ReportProvider with ChangeNotifier {
       return result.map((row) {
         final total = (row['total_records'] is int) ? row['total_records'] as int : int.tryParse('${row['total_records']}') ?? 0;
         final present = (row['present_count'] is int) ? row['present_count'] as int : int.tryParse('${row['present_count']}') ?? 0;
-        final absent = (row['absent_count'] is int) ? row['absent_count'] as int : int.tryParse('${row['absent_count']}') ?? 0;
+        // absent count not used here
         return {
           'date': row['date'],
           'total': total,
@@ -394,4 +396,97 @@ class ReportProvider with ChangeNotifier {
       return [];
     }
   }
+
+  /// Compute per-lecture overall attendance percentage for a given single date.
+  /// [date] should be in 'YYYY-MM-DD' format.
+  /// [semester] can be null or 0 to represent all semesters.
+  /// [department] can be null or 'All' to represent all departments.
+  Future<List<Map<String, dynamic>>> getDailyLectureAttendance({
+    required String date,
+    int? semester,
+    String? department,
+  }) async {
+    try {
+      // Lectures and their time slots (match UI ordering)
+      final slots = [
+        {'label': 'Lec 1 (8:00-8:50)', 'lecture': 1, 'timeslot': '8:00-8:50'},
+        {'label': 'Lec 2 (8:50-9:45)', 'lecture': 2, 'timeslot': '8:50-9:45'},
+        {'label': 'Lec 3 (10:00-10:50)', 'lecture': 3, 'timeslot': '10:00-10:50'},
+        {'label': 'Lec 4 (10:50-11:40)', 'lecture': 4, 'timeslot': '10:50-11:40'},
+        {'label': 'Lec 5 (12:30-1:20)', 'lecture': 5, 'timeslot': '12:30-1:20'},
+        {'label': 'Lec 6 (1:20-2:10)', 'lecture': 6, 'timeslot': '1:20-2:10'},
+      ];
+
+      // Determine which classes to include based on filters
+      List<Map<String, dynamic>> classCombs = await DatabaseHelper.instance.getClassCombinations();
+      // Filter classes according to semester and department
+      if (semester != null && semester > 0) {
+        classCombs = classCombs.where((c) => (c['semester'] as int) == semester).toList();
+      }
+      if (department != null && department.isNotEmpty && department.toLowerCase() != 'all') {
+        // department can be 'CE/IT', 'CE', 'IT'
+        classCombs = classCombs.where((c) {
+          final dept = (c['department'] as String);
+          if (department == 'CE/IT') return dept == 'CE' || dept == 'IT';
+          return dept == department;
+        }).toList();
+      }
+
+      // If no matching classes found, return zeros per slot
+      if (classCombs.isEmpty) {
+        return slots.map((s) => {'label': s['label'], 'percentage': 0.0, 'present': 0, 'strength': 0}).toList();
+      }
+
+      // For each class combination, get strength (number of students)
+      int totalStrength = 0;
+      final classKeys = <String>[]; // e.g., '3|CE|A'
+      for (final c in classCombs) {
+        final sem = c['semester'] as int;
+        final dept = c['department'] as String;
+        final div = c['division'] as String;
+        final students = await DatabaseHelper.instance.getStudentsByClass(sem, dept, div);
+        final strength = students.length;
+        totalStrength += strength;
+        classKeys.add('$sem|$dept|$div|$strength');
+      }
+
+      // If total strength is zero, return zeros
+      if (totalStrength == 0) {
+        return slots.map((s) => {'label': s['label'], 'percentage': 0.0, 'present': 0, 'strength': 0}).toList();
+      }
+
+      // For each lecture slot, count present students across all classes
+      final List<Map<String, dynamic>> results = [];
+      for (final slot in slots) {
+        int presentSum = 0;
+        int strengthSum = 0;
+        // For each class, fetch attendance records for the given date, lecture string
+        for (final ck in classKeys) {
+          final parts = ck.split('|');
+          final sem = int.parse(parts[0]);
+          final dept = parts[1];
+          final div = parts[2];
+          final strength = int.parse(parts[3]);
+          strengthSum += strength;
+
+          // Use DatabaseHelper method to get attendance by date/lecture filtering by class
+          // Re-fetch students for this class to get their IDs
+          final classStudents = await DatabaseHelper.instance.getStudentsByClass(sem, dept, div);
+          if (classStudents.isEmpty) continue;
+          final ids = classStudents.map((s) => s.id!).toList();
+          final presentCount = await DatabaseHelper.instance.countPresentByStudentIdsAndDateAndLecture(ids, date, '${slot['lecture']}');
+          presentSum += presentCount;
+        }
+
+        final percentage = strengthSum > 0 ? (presentSum / strengthSum * 100) : 0.0;
+        results.add({'label': slot['label'], 'percentage': percentage, 'present': presentSum, 'strength': strengthSum});
+      }
+
+      return results;
+    } catch (e) {
+      print('Error computing daily lecture attendance: $e');
+      return [];
+    }
+  }
 }
+

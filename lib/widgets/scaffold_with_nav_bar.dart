@@ -72,15 +72,6 @@ class ScaffoldWithNavBar extends StatelessWidget {
 
     final isWide = MediaQuery.of(context).size.width >= 900;
 
-    // Debug floating action button to jump to the debug sign-in screen.
-    final Widget? debugFab = kDebugMode
-        ? FloatingActionButton(
-            onPressed: () => context.go('/debug-signin'),
-            child: const Icon(Icons.login),
-            tooltip: 'Debug Sign-in',
-          )
-        : null;
-
     if (isWide) {
       return Scaffold(
         body: Row(
@@ -98,13 +89,11 @@ class ScaffoldWithNavBar extends StatelessWidget {
             Expanded(child: body),
           ],
         ),
-        floatingActionButton: debugFab,
       );
     }
 
     return Scaffold(
       body: body,
-      floatingActionButton: debugFab,
       bottomNavigationBar: NavigationBar(
         selectedIndex: currentIndex.clamp(0, navItems.length - 1),
         onDestinationSelected: (index) => _onItemTapped(context, index),

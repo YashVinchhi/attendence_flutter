@@ -319,6 +319,8 @@ class _SignInScreenState extends State<SignInScreen> {
                             DropdownButtonFormField<String>(
                               initialValue: _yearCtrl.text.isNotEmpty ? _yearCtrl.text : null,
                               decoration: const InputDecoration(labelText: 'Year / Batch'),
+                              // Ensure dropdown doesn't overflow horizontally and uses available width
+                              isExpanded: true,
                               items: List.generate(5, (i) => (i + 1).toString()).map((y) => DropdownMenuItem(value: y, child: Text(y))).toList(),
                               onChanged: (v) => _yearCtrl.text = v ?? '',
                               validator: (v) => (v == null || v.trim().isEmpty) ? 'Year required' : null,
@@ -358,8 +360,10 @@ class _SignInScreenState extends State<SignInScreen> {
                             child: _loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : Text(_isSignUp ? 'Create account' : 'Sign In'),
                           ),
                           const SizedBox(height: 12),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
+                          // Use Wrap so buttons wrap to the next line instead of causing horizontal overflow
+                          Wrap(
+                            alignment: WrapAlignment.center,
+                            spacing: 12,
                             children: [
                               TextButton(
                                 onPressed: () {
@@ -368,7 +372,6 @@ class _SignInScreenState extends State<SignInScreen> {
                                 },
                                 child: const Text('Debug Sign-in'),
                               ),
-                              const SizedBox(width: 12),
                               TextButton(
                                 onPressed: _loading ? null : () { setState(() { _isSignUp = !_isSignUp; _error = null; }); },
                                 child: Text(_isSignUp ? 'Already have an account? Sign in' : 'Create account'),
@@ -391,3 +394,4 @@ class _SignInScreenState extends State<SignInScreen> {
     );
   }
 }
+

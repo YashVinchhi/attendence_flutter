@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
+import '../services/database_helper.dart';
 
 class ManageCcsScreen extends StatefulWidget {
   const ManageCcsScreen({Key? key}) : super(key: key);
@@ -58,17 +59,97 @@ class _ManageCcsScreenState extends State<ManageCcsScreen> {
     final q = await _firestore.collection('users').where('email', isEqualTo: email.toLowerCase()).limit(1).get();
     if (q.docs.isEmpty) return null;
     final doc = q.docs.first;
-    final data = Map<String, dynamic>.from(doc.data() as Map<String, dynamic>);
+    final data = Map<String, dynamic>.from(doc.data());
     // Ensure we always return a uid key (fallback to doc id)
     data['uid'] = (data['uid'] ?? doc.id).toString();
     return data;
   }
 
   Future<void> _assignCc(String uid) async {
+    // New flow: prompt to select 1..N classes to assign to this CC, then write role + allowed_classes
+    final classes = await DatabaseHelper.instance.getClassCombinations();
+    if (classes.isEmpty) {
+      setState(() { _message = 'No classes available to assign'; });
+      return;
+    }
+
+    // Build display strings and track selection
+    final displayList = classes.map((c) => '${c['semester']}${c['department']}-${c['division']}').toList();
+    final selected = <int>{};
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx2, setState2) {
+          return AlertDialog(
+            title: const Text('Select classes for CC'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      TextButton(onPressed: () { setState2(() { for (int i = 0; i < displayList.length; i++) selected.add(i); }); }, child: const Text('Select all')),
+                      const SizedBox(width: 8),
+                      TextButton(onPressed: () { setState2(() { selected.clear(); }); }, child: const Text('Clear')),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: displayList.length,
+                      itemBuilder: (c, i) {
+                        return CheckboxListTile(
+                          value: selected.contains(i),
+                          title: Text(displayList[i]),
+                          onChanged: (v) {
+                            setState2(() {
+                              if (v == true) selected.add(i); else selected.remove(i);
+                            });
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx2).pop(false), child: const Text('Cancel')),
+              TextButton(onPressed: () => Navigator.of(ctx2).pop(true), child: const Text('Assign')),
+            ],
+          );
+        });
+      }
+    );
+
+    if (ok != true) return;
+
+    if (selected.isEmpty) {
+      setState(() { _message = 'Assignment cancelled: no classes selected'; });
+      return;
+    }
+
     setState(() { _loading = true; _message = null; });
     try {
-      await _firestore.collection('users').doc(uid).set({'role': 'CC'}, SetOptions(merge: true));
-      setState(() { _message = 'Assigned CC successfully'; });
+      // Convert selected indices to structured class maps
+      final allowedClasses = selected.map((i) {
+        final m = classes[i];
+        return {
+          'semester': m['semester'],
+          'department': m['department'],
+          'division': m['division'],
+        };
+      }).toList();
+
+      await _firestore.collection('users').doc(uid).set({
+        'role': 'CC',
+        'allowed_classes': allowedClasses,
+      }, SetOptions(merge: true));
+
+      setState(() { _message = 'Assigned CC and classes successfully'; });
     } catch (e) {
       if (e is FirebaseException && e.code == 'permission-denied') {
         setState(() { _message = 'Assign failed: insufficient permissions'; });
@@ -96,6 +177,127 @@ class _ManageCcsScreenState extends State<ManageCcsScreen> {
     } finally {
       setState(() { _loading = false; });
     }
+  }
+
+  // Edit allowed classes for a coordinator
+  Future<void> _editAllowedClasses(String uid, List<Map<String, dynamic>> currentClasses) async {
+    final classes = await DatabaseHelper.instance.getClassCombinations();
+    if (classes.isEmpty) {
+      setState(() { _message = 'No classes available to edit'; });
+      return;
+    }
+
+    final displayList = classes.map((c) => '${c['semester']}${c['department']}-${c['division']}').toList();
+    final selected = <int>{};
+
+    // Pre-select current classes
+    for (int i = 0; i < classes.length; i++) {
+      if (currentClasses.contains(classes[i])) {
+        selected.add(i);
+      }
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx2, setState2) {
+          return AlertDialog(
+            title: const Text('Edit Allowed Classes'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      TextButton(onPressed: () { setState2(() { for (int i = 0; i < displayList.length; i++) selected.add(i); }); }, child: const Text('Select all')),
+                      const SizedBox(width: 8),
+                      TextButton(onPressed: () { setState2(() { selected.clear(); }); }, child: const Text('Clear')),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: displayList.length,
+                      itemBuilder: (c, i) {
+                        return CheckboxListTile(
+                          value: selected.contains(i),
+                          title: Text(displayList[i]),
+                          onChanged: (v) {
+                            setState2(() {
+                              if (v == true) selected.add(i); else selected.remove(i);
+                            });
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx2).pop(false), child: const Text('Cancel')),
+              TextButton(onPressed: () => Navigator.of(ctx2).pop(true), child: const Text('Save')),
+            ],
+          );
+        });
+      }
+    );
+
+    if (ok != true) return;
+
+    if (selected.isEmpty) {
+      setState(() { _message = 'Edit cancelled: no classes selected'; });
+      return;
+    }
+
+    setState(() { _loading = true; _message = null; });
+    try {
+      final allowedClasses = selected.map((i) {
+        final m = classes[i];
+        return {
+          'semester': m['semester'],
+          'department': m['department'],
+          'division': m['division'],
+        };
+      }).toList();
+
+      await _firestore.collection('users').doc(uid).update({
+        'allowed_classes': allowedClasses,
+      });
+
+      setState(() { _message = 'Updated allowed classes successfully'; });
+    } catch (e) {
+      setState(() { _message = 'Update failed: $e'; });
+    } finally {
+      setState(() { _loading = false; });
+    }
+  }
+
+  // Add edit functionality for Class Coordinators
+  Widget _buildEditButton(String uid) {
+    return IconButton(
+      icon: const Icon(Icons.edit),
+      onPressed: () async {
+        // Navigate to edit screen or show edit dialog
+        final newName = await showDialog<String>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Edit Coordinator'),
+            content: TextField(
+              decoration: const InputDecoration(labelText: 'New Name'),
+              onSubmitted: (value) => Navigator.of(ctx).pop(value),
+            ),
+          ),
+        );
+
+        if (newName != null && newName.isNotEmpty) {
+          await _firestore.collection('users').doc(uid).update({'name': newName});
+          setState(() {}); // Refresh the UI
+        }
+      },
+    );
   }
 
   @override
@@ -203,18 +405,24 @@ class _ManageCcsScreenState extends State<ManageCcsScreen> {
                             child: ListTile(
                               title: Text(name + (isPending ? ' (pending)' : '')),
                               subtitle: Text(uid),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.remove_circle_outline),
-                                tooltip: 'Revoke CC',
-                                onPressed: _loading || isPending ? null : () async {
-                                  final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
-                                    title: const Text('Revoke CC'),
-                                    content: Text('Revoke CC role for "$name"?'),
-                                    actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')), TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Revoke'))],
-                                  ));
-                                  if (ok == true) await _revokeCc(uid);
-                                  setState(() {});
-                                },
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _buildEditButton(uid), // Edit button
+                                  IconButton(
+                                    icon: const Icon(Icons.remove_circle_outline),
+                                    tooltip: 'Revoke CC',
+                                    onPressed: _loading || isPending ? null : () async {
+                                      final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+                                        title: const Text('Revoke CC'),
+                                        content: Text('Revoke CC role for "$name"?'),
+                                        actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')), TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Revoke'))],
+                                      ));
+                                      if (ok == true) await _revokeCc(uid);
+                                      setState(() {});
+                                    },
+                                  ),
+                                ],
                               ),
                             ),
                           );

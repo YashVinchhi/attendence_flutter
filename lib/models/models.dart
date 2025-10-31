@@ -32,6 +32,7 @@ class Student {
   final String department;
   final String division;
   final String timeSlot;
+  final String enrollmentNumber; // New field for primary key
   final DateTime createdAt;
 
   Student({
@@ -42,6 +43,7 @@ class Student {
     required this.department,
     required this.division,
     required this.timeSlot,
+    required this.enrollmentNumber, // Added enrollmentNumber
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now() {
     // Validation
@@ -64,9 +66,8 @@ class Student {
     if (division.trim().isEmpty) {
       throw ArgumentError('Division cannot be empty');
     }
-    if (timeSlot.trim().isEmpty) {
-      throw ArgumentError('Time slot cannot be empty');
-    }
+
+    // timeSlot is optional in CSV import; do not require non-empty value here.
 
     // Validate roll number format (alphanumeric, max length)
     if (rollNumber.length > 20) {
@@ -88,6 +89,7 @@ class Student {
       'department': department.trim().toUpperCase(),
       'division': division.trim().toUpperCase(),
       'time_slot': timeSlot,
+      'enrollment_number': enrollmentNumber.trim().toUpperCase(), // Include in map
       'created_at': createdAt.toIso8601String(),
     };
   }
@@ -101,6 +103,7 @@ class Student {
       department: map['department'] ?? '',
       division: map['division'] ?? '',
       timeSlot: map['time_slot'] ?? '',
+      enrollmentNumber: map['enrollment_number'] ?? '', // Parse enrollment number
       createdAt: _parseDateTime(map['created_at']),
     );
   }
@@ -113,6 +116,7 @@ class Student {
     String? department,
     String? division,
     String? timeSlot,
+    String? enrollmentNumber, // Add to copyWith
     DateTime? createdAt,
   }) {
     return Student(
@@ -123,6 +127,7 @@ class Student {
       department: department ?? this.department,
       division: division ?? this.division,
       timeSlot: timeSlot ?? this.timeSlot,
+      enrollmentNumber: enrollmentNumber ?? this.enrollmentNumber, // Include in copy
       createdAt: createdAt ?? this.createdAt,
     );
   }

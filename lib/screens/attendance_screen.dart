@@ -5,6 +5,7 @@ import '../models/models.dart';
 import '../providers/student_provider.dart';
 import '../providers/attendance_provider.dart';
 import '../services/database_helper.dart';
+import '../providers/user_provider.dart';
 
 class AttendanceScreen extends StatefulWidget {
   const AttendanceScreen({super.key, this.initialDate});
@@ -24,13 +25,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   int? _selectedLectureNumber;
   String? _selectedTimeSlot; // <- restored time slot selection
   List<Student> _filteredStudents = [];
-  Map<int, bool> _attendanceStatus = {};
+  // Attendance status: 1 = present, 0 = absent, 2 = late
+  Map<int, int> _attendanceStatus = {};
 
   // UI additions
   bool _isLoading = false;
   String _searchQuery = '';
   String _sortBy = 'roll'; // 'name' | 'roll'
-  String _statusFilter = 'all'; // 'all' | 'present' | 'absent'
+  String _statusFilter = 'all'; // 'all' | 'present' | 'absent' | 'late'
 
   @override
   void initState() {
@@ -45,6 +47,26 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
     // Use post-frame callback to safely access context
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // If current user is CR, default class selection to their allowed class and hide selectors
+      final userProv = Provider.of<UserProvider>(context, listen: false);
+      if (userProv.isCr) {
+        final allowed = userProv.allowedClasses;
+        if (allowed.isNotEmpty) {
+          try {
+            // allowedClasses entries are like '3CE-B' or '3CE/IT-B' or '3CE-B' from AppUser.displayName
+            final first = allowed.first;
+            // Try to parse pattern like 3CE-B or 3 CE-B
+            final m = RegExp(r'(\d+)\s*([A-Za-z\/]+)-([A-Za-z]+)').firstMatch(first);
+            if (m != null) {
+              _selectedSemester = int.tryParse(m.group(1)!) ?? _selectedSemester;
+              _selectedDepartment = m.group(2)!.toUpperCase();
+              _selectedDivision = m.group(3)!.toUpperCase();
+            }
+          } catch (_) {
+            // ignore parse errors and fall back to defaults
+          }
+        }
+      }
       _loadStudentsAndAttendance();
     });
   }
@@ -100,9 +122,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     // Apply status filter if we already have attendanceStatus
     if (_statusFilter != 'all' && _attendanceStatus.isNotEmpty) {
       if (_statusFilter == 'present') {
-        list = list.where((s) => _attendanceStatus[s.id!] ?? true).toList();
+        list = list.where((s) => (_attendanceStatus[s.id!] ?? 1) == 1).toList();
       } else if (_statusFilter == 'absent') {
-        list = list.where((s) => !(_attendanceStatus[s.id!] ?? false)).toList();
+        list = list.where((s) => (_attendanceStatus[s.id!] ?? 1) == 0).toList();
+      } else if (_statusFilter == 'late') {
+        list = list.where((s) => (_attendanceStatus[s.id!] ?? 1) == 2).toList();
       }
     }
 
@@ -146,7 +170,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _filteredStudents = list;
       // Reset attendance status map keys if it was empty
       if (_attendanceStatus.isEmpty) {
-        _attendanceStatus = { for (var s in _filteredStudents) s.id!: true};
+        _attendanceStatus = { for (var s in _filteredStudents) s.id!: 1};
       }
     });
   }
@@ -160,25 +184,41 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         final dateStr = _selectedDate.toIso8601String().substring(0, 10);
         // If there is an explicit attendance record for this student/date/lecture, respect it.
         // Otherwise default to PRESENT as requested.
-        final hasRec = attendanceProvider.hasAttendanceRecord(
-            student.id!, dateStr, lecture: _getLectureString(), timeSlot: _selectedTimeSlot);
-        final isPresent = hasRec ? attendanceProvider.isStudentPresent(
-            student.id!, dateStr, lecture: _getLectureString(), timeSlot: _selectedTimeSlot) : true;
-        _attendanceStatus[student.id!] = isPresent;
+        AttendanceRecord? rec;
+        try {
+          rec = attendanceProvider.attendanceRecords.firstWhere((r) {
+            final rDate = r.date.toIso8601String().substring(0, 10);
+            final lectureMatch = (_getLectureString() == null) || (r.lecture == _getLectureString());
+            final timeMatch = (_selectedTimeSlot == null) || (r.timeSlot == _selectedTimeSlot);
+            return r.studentId == student.id! && rDate == dateStr && lectureMatch && timeMatch;
+          });
+        } catch (_) {
+          rec = null;
+        }
+        if (rec == null) {
+          _attendanceStatus[student.id!] = 1;
+        } else {
+          // If record found, interpret notes 'LATE' as late state
+          if (rec.notes != null && rec.notes!.toString().toUpperCase() == 'LATE') {
+            _attendanceStatus[student.id!] = 2;
+          } else {
+            _attendanceStatus[student.id!] = rec.isPresent ? 1 : 0;
+          }
+        }
       }
     });
   }
 
-  Future<void> _markAttendance(int studentId, bool isPresent) async {
+  Future<void> _markAttendance(int studentId, int status) async {
     setState(() {
-      _attendanceStatus[studentId] = isPresent;
+      _attendanceStatus[studentId] = status;
     });
   }
 
   Future<void> _markAllPresent() async {
     setState(() {
       for (var student in _filteredStudents) {
-        _attendanceStatus[student.id!] = true;
+        _attendanceStatus[student.id!] = 1;
       }
     });
     if (mounted) {
@@ -191,7 +231,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Future<void> _markAllAbsent() async {
     setState(() {
       for (var student in _filteredStudents) {
-        _attendanceStatus[student.id!] = false;
+        _attendanceStatus[student.id!] = 0;
       }
     });
     if (mounted) {
@@ -239,16 +279,34 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       final List<Future<bool>> tasks = [];
 
       for (var student in _filteredStudents) {
-        final isPresent = _attendanceStatus[student.id] ?? true;
-        tasks.add(
-            attendanceProvider.markAttendance(
-              student.id!,
-              dateString,
-              isPresent,
-              lecture: lectureString,
-              timeSlot: _selectedTimeSlot,
-            )
-        );
+        final status = _attendanceStatus[student.id] ?? 1;
+        if (status == 1) {
+          tasks.add(attendanceProvider.markAttendance(
+            student.id!,
+            dateString,
+            true,
+            lecture: lectureString,
+            timeSlot: _selectedTimeSlot,
+          ));
+        } else if (status == 0) {
+          tasks.add(attendanceProvider.markAttendance(
+            student.id!,
+            dateString,
+            false,
+            lecture: lectureString,
+            timeSlot: _selectedTimeSlot,
+          ));
+        } else {
+          // Late: persist as present with a LATE note
+          tasks.add(attendanceProvider.markAttendance(
+            student.id!,
+            dateString,
+            true,
+            notes: 'LATE',
+            lecture: lectureString,
+            timeSlot: _selectedTimeSlot,
+          ));
+        }
       }
 
       final results = await Future.wait(tasks);
@@ -456,30 +514,41 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             const SizedBox(height: 16),
 
             // Class Selection
-            Row(
-              children: [
-                Expanded(
-                  child: _buildFilterChip(
-                    label: 'Sem $_selectedSemester',
-                    onTap: () => _showSemesterPicker(),
+            Builder(builder: (ctx) {
+              final userProv = Provider.of<UserProvider>(ctx);
+              // CRs are assigned to a specific class; hide selectors for them
+              if (userProv.isCr) {
+                return Row(
+                  children: [
+                    Expanded(child: _buildFilterChip(label: 'Class ${_selectedSemester}${_selectedDepartment}-${_selectedDivision}')),
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  Expanded(
+                    child: _buildFilterChip(
+                      label: 'Sem $_selectedSemester',
+                      onTap: () => _showSemesterPicker(),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _buildFilterChip(
-                    label: _selectedDepartment,
-                    onTap: () => _showDepartmentPicker(),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildFilterChip(
+                      label: _selectedDepartment,
+                      onTap: () => _showDepartmentPicker(),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _buildFilterChip(
-                    label: 'Div $_selectedDivision',
-                    onTap: () => _showDivisionPicker(),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildFilterChip(
+                      label: 'Div $_selectedDivision',
+                      onTap: () => _showDivisionPicker(),
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              );
+            }),
             const SizedBox(height: 16),
 
             // Subject and Lecture
@@ -631,7 +700,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       _buildSummaryItem(
                         'Present',
                         '${_attendanceStatus.values
-                            .where((s) => s)
+                            .where((s) => s == 1)
                             .length}',
                         Theme.of(context).colorScheme.primary,
                         Icons.check_circle,
@@ -641,10 +710,20 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       _buildSummaryItem(
                         'Absent',
                         '${_attendanceStatus.values
-                            .where((s) => !s)
+                            .where((s) => s == 0)
                             .length}',
                         Theme.of(context).colorScheme.error,
                         Icons.cancel,
+                      ),
+                      Container(
+                          width: 1, height: 40, color: scheme.outline),
+                      _buildSummaryItem(
+                        'Late',
+                        '${_attendanceStatus.values
+                            .where((s) => s == 2)
+                            .length}',
+                        Theme.of(context).colorScheme.tertiary,
+                        Icons.access_time,
                       ),
                     ],
                   ),
@@ -730,7 +809,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 ),
             // Student cards
             ..._filteredStudents.map((student) {
-              final isPresent = _attendanceStatus[student.id] ?? true;
+              final status = _attendanceStatus[student.id] ?? 1;
               return Card(
                 elevation: 0,
                 margin: const EdgeInsets.only(bottom: 12),
@@ -740,7 +819,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 ),
                 child: InkWell(
                   borderRadius: BorderRadius.circular(12),
-                  onTap: () => _markAttendance(student.id!, !isPresent),
+                  onTap: () {
+                    // Cycle present -> absent -> late -> present on card tap
+                    final cur = _attendanceStatus[student.id!] ?? 1;
+                    final next = cur == 1 ? 0 : (cur == 0 ? 2 : 1);
+                    _markAttendance(student.id!, next);
+                  },
                   child: Padding(
                     padding: const EdgeInsets.all(12),
                     child: Row(
@@ -748,17 +832,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                         // Avatar with initial
                         CircleAvatar(
                           radius: 24,
-                          backgroundColor: isPresent
+                          backgroundColor: status == 1
                               ? Theme.of(context).colorScheme.primary.withAlpha(0x12)
-                              : Theme.of(context).colorScheme.error.withAlpha(0x12),
+                              : status == 0
+                                  ? Theme.of(context).colorScheme.error.withAlpha(0x12)
+                                  : Theme.of(context).colorScheme.tertiary.withAlpha(0x12),
                           child: Text(
                             student.name.isNotEmpty
                                 ? student.name[0].toUpperCase()
                                 : 'S',
                             style: TextStyle(
-                              color: isPresent
+                              color: status == 1
                                   ? Theme.of(context).colorScheme.primary
-                                  : Theme.of(context).colorScheme.error,
+                                  : status == 0
+                                      ? Theme.of(context).colorScheme.error
+                                      : Theme.of(context).colorScheme.tertiary,
                               fontWeight: FontWeight.bold,
                               fontSize: 18,
                             ),
@@ -791,15 +879,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        // Present/Absent circular buttons
+                        // Tri-state buttons: Present / Absent / Late
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            _buildCircleToggle(isPresent, true, onTap: () =>
-                                _markAttendance(student.id!, true)),
+                            _buildTriToggle(student.id!, 1, Icons.check, Theme.of(context).colorScheme.primary, tooltip: 'Present'),
                             const SizedBox(width: 8),
-                            _buildCircleToggle(!isPresent, false, onTap: () =>
-                                _markAttendance(student.id!, false)),
+                            _buildTriToggle(student.id!, 0, Icons.close, Theme.of(context).colorScheme.error, tooltip: 'Absent'),
+                            const SizedBox(width: 8),
+                            _buildTriToggle(student.id!, 2, Icons.access_time, Theme.of(context).colorScheme.tertiary, tooltip: 'Late'),
                           ],
                         ),
                       ],
@@ -923,23 +1011,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     );
   }
 
-  Widget _buildCircleToggle(bool active, bool positive,
-      {required VoidCallback onTap}) {
+  Widget _buildTriToggle(int studentId, int statusValue, IconData icon, Color color, {String? tooltip}) {
+    final active = (_attendanceStatus[studentId] ?? 1) == statusValue;
     return InkWell(
-      onTap: onTap,
+      onTap: () => _markAttendance(studentId, statusValue),
       borderRadius: BorderRadius.circular(28),
       child: Container(
         width: 44,
         height: 44,
         decoration: BoxDecoration(
-          color: active ? (positive ? Theme.of(context).colorScheme.primary.withAlpha(0x12) : Theme.of(context).colorScheme.error.withAlpha(0x12)) : Theme.of(context).colorScheme.surfaceContainerHighest,
+          color: active ? color.withAlpha(0x12) : Theme.of(context).colorScheme.surfaceContainerHighest,
           shape: BoxShape.circle,
-          border: Border.all(color: active ? (positive ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.error) : Theme.of(context).colorScheme.outline, width: active ? 2 : 1),
+          border: Border.all(color: active ? color : Theme.of(context).colorScheme.outline, width: active ? 2 : 1),
         ),
         child: Center(
           child: Icon(
-            positive ? Icons.check : Icons.close,
-            color: active ? (positive ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.error) : Theme.of(context).colorScheme.onSurface.withAlpha((0.8 * 255).round()),
+            icon,
+            color: active ? color : Theme.of(context).colorScheme.onSurface.withAlpha((0.8 * 255).round()),
             size: 20,
           ),
         ),

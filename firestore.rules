@@ -7,35 +7,90 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Return the user's document snapshot (or null if it doesn't exist)
-    function userDoc() {
-      return signedIn() ? get(/databases/$(database)/documents/users/$(request.auth.uid)) : null;
+    // Check whether the user document exists in /users/{uid}
+    function userExists() {
+      return request.auth != null && exists(/databases/$(database)/documents/users/$(request.auth.uid));
     }
 
-    // Return the user's document data (or null) — safe to call
+    // Return user's document data (only call when userExists() is true)
     function userData() {
-      return (userDoc() != null && userDoc().exists) ? userDoc().data : null;
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
 
     // Admin/HOD check (super-privileged)
     function isAdminOrHod() {
-      return signedIn() && userData() != null && (userData().role == 'HOD' || userData().role == 'ADMIN');
+      return signedIn() && userExists() && (userData().role == 'HOD' || userData().role == 'ADMIN');
     }
 
     // Generic permission check: checks `users/{uid}.permissions` array or admin/hod
     function hasPermission(permission) {
       return signedIn() && (
         isAdminOrHod()
-        || (userData() != null && userData().permissions is list && userData().permissions.contains(permission))
+        || (userExists() && userData().permissions is list && permission in userData().permissions)
       );
+    }
+
+    // Helper: check whether the current authenticated user is allowed to access a specific student doc
+    // docData should be a student document (resource.data or request.resource.data)
+    function allowedForStudent(docData) {
+      let expectedClass = {
+        "semester": docData.semester,
+        "division": docData.division,
+        "department": docData.department
+      };
+
+      let expectedClassAlt = {
+        "semester": docData.semester,
+        "division": docData.division,
+        "department": docData.branch
+      };
+
+      return signedIn()
+        && userExists()
+        && userData().allowed_classes is list
+        && userData().allowed_classes.size() > 0
+        && (expectedClass in userData().allowed_classes || expectedClassAlt in userData().allowed_classes);
     }
 
     // Students collection: restrict direct deletes; writes by permission only.
     match /students/{studentId} {
-      allow read: if signedIn() && (hasPermission('view_students') || isAdminOrHod());
-      allow create: if signedIn() && hasPermission('create_student');
-      allow update: if signedIn() && hasPermission('update_student');
-      // Deletes are disallowed from clients — use trusted server (Functions) to delete.
+      allow get, list: if signedIn() && (
+        isAdminOrHod()
+        || (userExists() && (userData().role == 'CC' || userData().role == 'CR') && allowedForStudent(resource.data))
+      );
+
+      allow create, update, delete: if signedIn() && (
+        isAdminOrHod()
+        || (userExists() && (userData().role == 'CC' || userData().role == 'CR') && allowedForStudent(request.resource.data))
+      );
+    }
+
+    // Users collection: users can read their own doc; only managers can manage other user docs.
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || hasPermission('manage_users'));
+
+      allow create: if signedIn() && (
+        hasPermission('manage_users')
+        || (
+          request.auth.uid == userId
+          && !(request.resource.data.keys().hasAny(['permissions', 'allowed_classes', 'is_active']))
+          && (!request.resource.data.keys().hasAny(['role']) || request.resource.data.role == 'STUDENT')
+          && (!request.resource.data.keys().hasAny(['uid']) || request.resource.data.uid == userId)
+        )
+      );
+
+      allow update: if signedIn() && (
+        hasPermission('manage_users')
+        || (
+          request.auth.uid == userId
+          && !(request.resource.data.keys().hasAny(['permissions', 'allowed_classes', 'is_active', 'role']))
+          && (!request.resource.data.keys().hasAny(['uid']) || request.resource.data.uid == userId)
+        )
+        || (
+          userExists() && userData().role == 'ADMIN' && request.resource.data.keys().hasAny(['assignedClasses'])
+        )
+      );
+
       allow delete: if false;
     }
 
@@ -49,12 +104,8 @@ service cloud.firestore {
 
     // Invites: creation allowed only to users with invite permission (server functions preferred)
     match /invites/{inviteId} {
-      // Creation should normally be done by a trusted Cloud Function;
-      // client creation is allowed only when the caller has explicit permission.
       allow create: if signedIn() && hasPermission('create_invite');
-      // Reading: admins can read all invites; creators can read their own invites
       allow read: if signedIn() && (isAdminOrHod() || (resource.data.createdBy == request.auth.uid));
-      // No client updates/deletes — use callable functions to revoke/mark used.
       allow update: if false;
       allow delete: if false;
     }
@@ -67,52 +118,22 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Users: users can read their own doc; only managers can manage other user docs.
-    // Allow authenticated users to create their own profile document (users/{uid}),
-    // but restrict sensitive keys so only admins/managers can set them.
-    match /users/{userId} {
-      // Read: the user themself or managers
-      allow read: if signedIn() && (request.auth.uid == userId || hasPermission('manage_users'));
-
-      // Create:
-      // - Admins/managers may create any users doc.
-      // - A regular authenticated user may create their own users/{uid} doc,
-      //   but must not set sensitive fields (permissions, allowed_classes, is_active, role).
-      allow create: if signedIn() && (
-        hasPermission('manage_users')
-        || (
-          request.auth.uid == userId
-          && // disallow sensitive keys on self-create
-          !(request.resource.data.keys().hasAny(['permissions', 'allowed_classes', 'is_active']))
-          // if client provides 'role', it must be the non-privileged default 'STUDENT' or omitted
-          && (!request.resource.data.keys().hasAny(['role']) || request.resource.data.role == 'STUDENT')
-          // uid in payload (if provided) must match path
-          && (!request.resource.data.keys().hasAny(['uid']) || request.resource.data.uid == userId)
-        )
-      );
-
-      // Update:
-      // - Admins/managers can update any field.
-      // - Regular users can update their own profile but must NOT change sensitive keys.
-      allow update: if signedIn() && (
-        hasPermission('manage_users')
-        || (
-          request.auth.uid == userId
-          && // user updates must not include sensitive keys
-          !(request.resource.data.keys().hasAny(['permissions', 'allowed_classes', 'is_active', 'role']))
-          // ensure uid is not changed
-          && (!request.resource.data.keys().hasAny(['uid']) || request.resource.data.uid == userId)
-        )
-      );
-
-      // Deletes only via trusted admin function; block client deletes
-      allow delete: if false;
-    }
-
     // Audit logs should only be written/read by server-side code
     match /audit_logs/{doc} {
       allow read: if false;
-      allow write: if false;
+      allow write: if request.auth != null && isAdminOrHod();
+    }
+
+    // Classes or Divisions collection: controlled reads
+    match /classes/{classId} {
+      allow read: if signedIn();
+      allow create, update, delete: if false;
+    }
+
+    // Alias for Divisions pointing to Classes
+    match /divisions/{divisionId} {
+      allow read: if signedIn();
+      allow create, update, delete: if false;
     }
 
     // Default: deny everything else
